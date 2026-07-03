@@ -684,6 +684,13 @@ async function start() {
           const prev = latestQR;
           storeLatestQR(pngBuffer);
           logInfo('[WA][QR] New QR generated. Open:', { url: QR_PUBLIC_URL });
+          // log a small preview only (never full base64)
+          try {
+            const preview = safeSlice(pngBuffer.toString('base64'), 120);
+            logInfo('[WA][QR] QR preview (truncated)', { preview });
+          } catch (e) {
+            /* ignore preview errors */
+          }
           if (!prev || !prev.png.equals(pngBuffer)) {
             logInfo('[WA][QR] QR updated', { ageMs: 0 });
           }
@@ -734,11 +741,29 @@ async function start() {
 
         if (statusCode === DisconnectReason.restartRequired || reason?.includes('restart_required') || statusCode === 515) {
           logWarn('[WA][STATE] Restart required detected', { statusCode, reason });
-          // don't reconnect while QR waiting; if QR is present, wait for scan or expiry
+          // If a QR is waiting, defer any restart until QR lifecycle completes
           if (isQRAvailable()) {
-            logInfo('Restart required but QR pending; delaying reconnect until after QR lifecycle');
+            logInfo('Restart required but QR pending; delaying restart until after QR lifecycle');
             return;
           }
+
+          // perform a controlled restart: stop socket, save creds, then reconnect with backoff
+          try {
+            logInfo('[WA][STATE] Performing controlled restart due to server request', { statusCode });
+            await saveStateSafely(() => authState?.saveCreds && authState.saveCreds());
+          } catch (e) {
+            logWarn('Failed to save creds before restart', { error: e?.message || e });
+          }
+
+          try {
+            await stopSocket('restart_required');
+          } catch (err) {
+            logWarn('Error stopping socket during restart flow', { error: err?.message || err });
+          }
+
+          // schedule reconnect (use reconnectSocket which enforces backoff and guards)
+          reconnectSocket('restart_required', lastDisconnect);
+          return;
         }
 
         const shouldReconnectNow = shouldReconnect('connection_closed', lastDisconnect);
