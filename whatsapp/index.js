@@ -570,16 +570,14 @@ async function start() {
     try {
       await ensureAuthDir();
 
-        // Warn if WA_AUTH_DIR not explicitly configured (likely ephemeral on some hosts)
-        if (!process.env.WA_AUTH_DIR) {
-          logWarn('[AUTH] WA_AUTH_DIR not set; auth may not survive deploys. Set WA_AUTH_DIR to a persistent disk path on Render.');
-        }
+      if (!process.env.WA_AUTH_DIR) {
+        logWarn('[AUTH] WA_AUTH_DIR not set; auth may not survive deploys. Set WA_AUTH_DIR to a persistent disk path on Render.');
+      }
 
       const logger = pino({ level: process.env.BAILEYS_LOG_LEVEL || 'info' });
 
       const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
       authState = state;
-      // expose saveCreds to outer scope for use across reconnects
       saveCredsFn = saveCreds;
       logInfo('[AUTH] Credentials loaded', { hasCreds: Boolean(authState?.creds), authDir: AUTH_DIR });
 
@@ -601,30 +599,24 @@ async function start() {
       lastSocketHealth = { timestamp: Date.now(), state: 'starting' };
       markActivity();
 
-      // register a single creds.update handler that persists and verifies writes
+      // register saveCreds directly (exactly once)
       try {
-        // remove previous handlers to avoid duplicates
         sock.ev.removeAllListeners?.('creds.update');
-
-        const saveCredsHandler = async () => {
-          try {
-            if (typeof saveCredsFn === 'function') {
-              await saveCredsFn();
-            }
-
-            // also write a simplified creds.json for quick checks and recovery
-            if (authState?.creds) {
+        if (typeof saveCredsFn === 'function') {
+          sock.ev.on('creds.update', saveCredsFn);
+          sock.ev.on('creds.update', () => {
+            try {
               const statePath = path.join(AUTH_DIR, 'creds.json');
-              fs.writeFileSync(statePath, JSON.stringify(authState.creds, null, 2));
-              logInfo('[AUTH] Auth saved to disk', { path: statePath });
+              const exists = fs.existsSync(statePath);
+              logInfo('[AUTH] creds.update fired', { credsSavedToDisk: exists, path: statePath });
+            } catch (e) {
+              logWarn('[AUTH] creds.update verification failed', { error: e?.message || e });
             }
-          } catch (err) {
-            logError('[AUTH] saveCreds handler failed', { error: err?.message || err });
-          }
-        };
-
-        sock.ev.on('creds.update', saveCredsHandler);
-        logInfo('[AUTH] Registered single creds.update handler');
+          });
+          logInfo('[AUTH] Registered creds.update handler (saveCreds)');
+        } else {
+          logWarn('[AUTH] saveCredsFn is not a function; creds.update not registered');
+        }
       } catch (err) {
         logWarn('[AUTH] Failed to register creds.update handler', { error: err?.message || err });
       }
@@ -634,333 +626,313 @@ async function start() {
     } finally {
       isConnecting = false;
       startInProgress = false;
-      startPromise = null;
     }
 
-    // Consolidated connection.update handler with detailed logging
-    // Ensure single registration
-    sock.ev.removeAllListeners?.('connection.update');
-    sock.ev.on('connection.update', async (update) => {
+    // connection.update handler
     try {
-      const { connection, lastDisconnect, qr, receivedPendingNotifications, isOnline, isNewLogin } = update;
-
-      logInfo('[WA][EVENT] connection.update', {
-        connection,
-        lastDisconnect: lastDisconnect ? { message: lastDisconnect?.error?.message, output: lastDisconnect?.error?.output } : null,
-        wsReadyState: sock?.ws?.readyState,
-        userId: sock?.user?.id,
-      });
-
-      // If QR data is present but we're running in pairing-code mode, ignore any QR payloads.
-      if (qr && !USE_PAIRING_CODE) {
-        logInfo('[WA][AUTH] QR payload received (QR-mode active)');
-      }
-
-      if (connection === 'connecting') {
-        setConnectionState(ConnectionStates.CONNECTING);
-        logInfo('[WA][STATE] Connecting');
-        // Pairing-mode: only use phone-number pairing (no QR). If USE_PAIRING_CODE=false then QR mode allowed.
+      sock.ev.removeAllListeners?.('connection.update');
+      sock.ev.on('connection.update', async (update) => {
         try {
-          const credsExist = Boolean(authState && authState.creds && Object.keys(authState.creds || {}).length > 0);
-          const credsRegistered = Boolean(authState?.creds?.registered === true);
+          const { connection, lastDisconnect, qr, receivedPendingNotifications, isOnline, isNewLogin } = update;
+          logInfo('[WA][EVENT] connection.update', {
+            connection,
+            lastDisconnect: lastDisconnect ? { message: lastDisconnect?.error?.message, output: lastDisconnect?.error?.output } : null,
+            wsReadyState: sock?.ws?.readyState,
+            userId: sock?.user?.id,
+          });
 
-          if (USE_PAIRING_CODE) {
-            // If credentials exist and are registered -> skip pairing
-            if (credsRegistered) {
-              logInfo('[AUTH] Valid credentials present; skipping pairing', { authDir: AUTH_DIR });
-            } else if (credsExist && !credsRegistered) {
-              // Credentials present but not registered -> treat as invalid: clear and restart to request new pairing
-              logWarn('[AUTH] Credentials present but not registered; clearing and re-requesting pairing', { authDir: AUTH_DIR });
+          if (qr && USE_PAIRING_CODE) {
+            logInfo('[WA][AUTH] Ignoring QR payload (pairing-mode active)');
+          }
+
+          if (connection === 'connecting') {
+            setConnectionState(ConnectionStates.CONNECTING);
+            logInfo('[WA][STATE] Connecting');
+
+            // Pairing-mode: only request pairing code if no credentials exist. Do NOT delete credentials here.
+            try {
+              const credsFileExists = fs.existsSync(path.join(AUTH_DIR, 'creds.json'));
+              const credsRegistered = Boolean(authState?.creds?.registered === true);
+
+              if (USE_PAIRING_CODE) {
+                if (credsFileExists || credsRegistered) {
+                  logInfo('[AUTH] Credentials appear present; skipping pairing for now', { credsFileExists, credsRegistered });
+                } else {
+                  if (pairingCodeRequested) {
+                    logInfo('[AUTH] Pairing code already requested; skipping duplicate');
+                  } else if (!sock || typeof sock.requestPairingCode !== 'function') {
+                    logWarn('[AUTH] requestPairingCode unavailable on socket yet; will wait for a later update');
+                  } else if (typeof saveCredsFn !== 'function') {
+                    logWarn('[AUTH] saveCredsFn unavailable; not requesting pairing code to avoid loss of creds');
+                  } else {
+                    logInfo('[AUTH] Requesting pairing code (pairing-mode)');
+                    pairingCodeRequested = true;
+                    setConnectionState(ConnectionStates.AWAITING_PAIRING_CODE);
+                    await new Promise((r) => setTimeout(r, 250));
+                    try {
+                      const pairingCode = await sock.requestPairingCode(phoneNumber);
+                      console.log('==================================');
+                      console.log('WHATSAPP PAIRING CODE');
+                      console.log('');
+                      console.log(pairingCode);
+                      console.log('');
+                      console.log('Open WhatsApp');
+                      console.log('Linked Devices');
+                      console.log('Link with Phone Number');
+                      console.log('Enter the code above');
+                      console.log('==================================');
+                      logInfo('[AUTH] Pairing code generated', { pairingCode: safeSlice(pairingCode, 200) });
+                    } catch (error) {
+                      pairingCodeRequested = false;
+                      logError('[AUTH] requestPairingCode failed', { error: error?.message || error });
+                    }
+                  }
+                }
+              } else {
+                logInfo('[AUTH] Non-pairing mode: QR handling may occur (not modified)');
+              }
+            } catch (err) {
+              logWarn('[AUTH] Error while deciding to request pairing code', { error: err?.message || err });
+            }
+          }
+
+          if (connection === 'open') {
+            reconnectAttempts = 0;
+            isReconnecting = false;
+            heartbeatUnhealthyCount = 0;
+            lastSocketHealth = { timestamp: Date.now(), state: 'open' };
+            setConnectionState(ConnectionStates.CONNECTED);
+            markActivity();
+            logInfo('[WA][STATE] Connected', { isOnline, isNewLogin, receivedPendingNotifications });
+            logInfo('[WA] Connection opened', { user: sock?.user });
+            return;
+          }
+
+          if (connection === 'close') {
+            const statusCode = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.output?.status || null;
+            const reason = lastDisconnect?.error?.output?.payload?.message || lastDisconnect?.error?.message || 'unknown';
+            lastSocketHealth = { timestamp: Date.now(), state: 'closed' };
+            setConnectionState(ConnectionStates.DISCONNECTED);
+            logWarn('[WA][STATE] Disconnected', { statusCode, reason, lastDisconnect });
+
+            // Handle specific status codes
+            if (statusCode === DisconnectReason.loggedOut || statusCode === 401 || reason?.toLowerCase().includes('logged out') || reason?.toLowerCase().includes('401')) {
+              logError('[WA][STATE] Invalid or logged out credentials detected; clearing auth state', { statusCode, reason });
               try {
                 await clearAuthState();
-              } catch (e) {
-                logWarn('[AUTH] clearAuthState failed', { error: e?.message || e });
+              } catch (error) {
+                logError('[AUTH] clearAuthState failed', { error: error?.message || error });
               }
 
               try {
-                // stop current socket and immediately start a fresh socket so pairing code will be generated
-                await stopSocket('invalid_credentials_pairing');
-              } catch (e) {
-                logWarn('[AUTH] stopSocket failed after clearing creds', { error: e?.message || e });
+                await stopSocket('invalid_credentials');
+              } catch (error) {
+                logWarn('Error stopping socket after invalid credentials', { error: error?.message || error });
               }
 
-              // reset pairing flag and schedule immediate start to generate new pairing code
-              pairingCodeRequested = false;
-              setTimeout(() => start().catch((err) => logError('start after clearAuth failed', { error: err?.message || err })), 200);
-            } else {
-              // No credentials: request pairing code when socket exposes the function
-              if (pairingCodeRequested) {
-                logInfo('[AUTH] Pairing code already requested; skipping duplicate');
-              } else if (!sock || typeof sock.requestPairingCode !== 'function') {
-                logWarn('[AUTH] requestPairingCode unavailable on socket yet; will wait for a later update');
-              } else if (typeof saveCredsFn !== 'function') {
-                logWarn('[AUTH] saveCredsFn unavailable; not requesting pairing code to avoid loss of creds');
+              if (USE_PAIRING_CODE) {
+                pairingCodeRequested = false;
+                logInfo('[RECONNECT] Restarting immediately to generate new pairing code (pairing-mode)');
+                setTimeout(() => start().catch((err) => logError('start after loggedOut failed', { error: err?.message || err })), 200);
               } else {
-                logInfo('[AUTH] Requesting pairing code (pairing-mode)');
-                pairingCodeRequested = true;
-                setConnectionState(ConnectionStates.AWAITING_PAIRING_CODE);
-                await new Promise((r) => setTimeout(r, 250));
-                try {
-                  const pairingCode = await sock.requestPairingCode(phoneNumber);
-                  console.log('==================================');
-                  console.log('WHATSAPP PAIRING CODE');
-                  console.log('');
-                  console.log(pairingCode);
-                  console.log('');
-                  console.log('Open WhatsApp');
-                  console.log('Linked Devices');
-                  console.log('Link with Phone Number');
-                  console.log('Enter the code above');
-                  console.log('==================================');
-                  logInfo('[AUTH] Pairing code generated', { pairingCode: safeSlice(pairingCode, 200) });
-                } catch (error) {
-                  pairingCodeRequested = false;
-                  logError('[AUTH] requestPairingCode failed', { error: error?.message || error });
-                }
+                reconnectSocket('invalid_credentials', lastDisconnect);
               }
+              return;
             }
-          } else {
-            // QR-mode or default behavior: if QR present and available, the app can handle it elsewhere.
-            logInfo('[AUTH] Non-pairing mode: QR handling may occur (not modified)');
+
+            if (statusCode === DisconnectReason.restartRequired || reason?.includes('restart_required')) {
+              logWarn('[WA][STATE] Restart required detected', { statusCode, reason });
+
+              try {
+                logInfo('[WA][STATE] Performing controlled restart due to server request', { statusCode });
+                await saveStateSafely(saveCredsFn);
+              } catch (e) {
+                logWarn('Failed to save creds before restart', { error: e?.message || e });
+              }
+
+              try {
+                await stopSocket('restart_required');
+              } catch (err) {
+                logWarn('Error stopping socket during restart flow', { error: err?.message || err });
+              }
+
+              reconnectSocket('restart_required', lastDisconnect);
+              return;
+            }
+
+            if ([408, 428, 440, 500].includes(Number(statusCode))) {
+              logWarn('[WA][STATE] Transient status code, scheduling reconnect', { statusCode });
+              reconnectSocket('transient_error', lastDisconnect);
+              return;
+            }
+
+            if (Number(statusCode) === 515 || reason?.toLowerCase().includes('stream errored') || reason?.toLowerCase().includes('stream_error')) {
+              logWarn('[WA][STATE] Stream errored (515) detected; rebuilding socket', { statusCode, reason });
+              try {
+                await stopSocket('stream_errored_515');
+              } catch (e) {
+                logWarn('[WA] stopSocket failed during 515 handling', { error: e?.message || e });
+              }
+              setTimeout(() => start().catch((err) => logError('start after 515 failed', { error: err?.message || err })), 1000);
+              return;
+            }
+
+            const shouldReconnectNow = shouldReconnect('connection_closed', lastDisconnect);
+            if (shouldReconnectNow) {
+              await reconnectSocket('connection_closed', lastDisconnect);
+            }
           }
         } catch (err) {
-          logWarn('[AUTH] Error while deciding to request pairing code', { error: err?.message || err });
+          logError('connection.update handler error', { error: err?.message || err, stack: err?.stack });
         }
-      }
-
-      if (connection === 'open') {
-        reconnectAttempts = 0;
-        isReconnecting = false;
-        heartbeatUnhealthyCount = 0;
-        lastSocketHealth = { timestamp: Date.now(), state: 'open' };
-        setConnectionState(ConnectionStates.CONNECTED);
-        markActivity();
-        logInfo('[WA][STATE] Connected', { isOnline, isNewLogin, receivedPendingNotifications });
-        return;
-      }
-
-      if (connection === 'close') {
-        const statusCode = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.output?.status || null;
-        const reason = lastDisconnect?.error?.output?.payload?.message || lastDisconnect?.error?.message || 'unknown';
-        lastSocketHealth = { timestamp: Date.now(), state: 'closed' };
-        setConnectionState(ConnectionStates.DISCONNECTED);
-        logWarn('[WA][STATE] Disconnected', { statusCode, reason, lastDisconnect });
-
-        // Handle specific status codes
-        if (statusCode === DisconnectReason.loggedOut || statusCode === 401 || reason?.toLowerCase().includes('logged out') || reason?.toLowerCase().includes('401')) {
-          logError('[WA][STATE] Invalid or logged out credentials detected; clearing auth state', { statusCode, reason });
-          try {
-            await clearAuthState();
-          } catch (error) {
-            logError('[AUTH] clearAuthState failed', { error: error?.message || error });
-          }
-
-          try {
-            await stopSocket('invalid_credentials');
-          } catch (error) {
-            logWarn('Error stopping socket after invalid credentials', { error: error?.message || error });
-          }
-
-          // In pairing-mode, immediately restart to generate a new pairing code.
-          if (USE_PAIRING_CODE) {
-            pairingCodeRequested = false;
-            logInfo('[RECONNECT] Restarting immediately to generate new pairing code (pairing-mode)');
-            setTimeout(() => start().catch((err) => logError('start after loggedOut failed', { error: err?.message || err })), 200);
-          } else {
-            reconnectSocket('invalid_credentials', lastDisconnect);
-          }
-          return;
-        }
-
-        if (statusCode === DisconnectReason.restartRequired || reason?.includes('restart_required')) {
-          logWarn('[WA][STATE] Restart required detected', { statusCode, reason });
-
-          // perform a controlled restart: stop socket, save creds, then reconnect with backoff
-          try {
-            logInfo('[WA][STATE] Performing controlled restart due to server request', { statusCode });
-            await saveStateSafely(saveCredsFn);
-          } catch (e) {
-            logWarn('Failed to save creds before restart', { error: e?.message || e });
-          }
-
-          try {
-            await stopSocket('restart_required');
-          } catch (err) {
-            logWarn('Error stopping socket during restart flow', { error: err?.message || err });
-          }
-
-          // schedule reconnect (use reconnectSocket which enforces backoff and guards)
-          reconnectSocket('restart_required', lastDisconnect);
-          return;
-        }
-
-        // transient errors -> reconnect
-        if ([408, 428, 440, 500].includes(Number(statusCode))) {
-          logWarn('[WA][STATE] Transient status code, scheduling reconnect', { statusCode });
-          reconnectSocket('transient_error', lastDisconnect);
-          return;
-        }
-
-        // Stream Errored -> recreate socket cleanly
-        if (Number(statusCode) === 515 || reason?.toLowerCase().includes('stream errored') || reason?.toLowerCase().includes('stream_error')) {
-          logWarn('[WA][STATE] Stream errored (515) detected; rebuilding socket', { statusCode, reason });
-          try {
-            await stopSocket('stream_errored_515');
-          } catch (e) {
-            logWarn('[WA] stopSocket failed during 515 handling', { error: e?.message || e });
-          }
-          // small delay then start fresh
-          setTimeout(() => start().catch((err) => logError('start after 515 failed', { error: err?.message || err })), 1000);
-          return;
-        }
-
-        const shouldReconnectNow = shouldReconnect('connection_closed', lastDisconnect);
-        if (shouldReconnectNow) {
-          await reconnectSocket('connection_closed', lastDisconnect);
-        }
-      }
+      });
     } catch (err) {
-      logError('connection.update handler error', { error: err?.message || err, stack: err?.stack });
+      logError('Failed to register connection.update handler', { error: err?.message || err });
     }
-  });
 
-  sock.ev.on('messages.upsert', (event) => {
-    setImmediate(() => {
-      handleUpsertEvent(sock, event).catch((error) => {
-        logError('messages.upsert outer handler error', { message: error?.message, stack: error?.stack });
+    // other event handlers
+    sock.ev.removeAllListeners?.('messages.upsert');
+    sock.ev.on('messages.upsert', (event) => {
+      setImmediate(() => {
+        handleUpsertEvent(sock, event).catch((error) => {
+          logError('messages.upsert outer handler error', { message: error?.message, stack: error?.stack });
+        });
       });
     });
-  });
 
-  sock.ev.on('ws.close', () => {
-    logWarn('[WA][STATE] WebSocket closed', { wsReadyState: sock?.ws?.readyState });
-    reconnectSocket('websocket_closed', null).catch((error) => logError('ws.close reconnect failed', { error: error?.message || error }));
-  });
+    sock.ev.removeAllListeners?.('ws.close');
+    sock.ev.on('ws.close', () => {
+      logWarn('[WA][STATE] WebSocket closed', { wsReadyState: sock?.ws?.readyState });
+      reconnectSocket('websocket_closed', null).catch((error) => logError('ws.close reconnect failed', { error: error?.message || error }));
+    });
 
-  sock.ev.on('ws.error', (error) => {
-    logError('[WA][STATE] WebSocket error', { error: error?.message || error });
-    reconnectSocket('websocket_error', null).catch((error) => logError('ws.error reconnect failed', { error: error?.message || error }));
-  });
+    sock.ev.removeAllListeners?.('ws.error');
+    sock.ev.on('ws.error', (error) => {
+      logError('[WA][STATE] WebSocket error', { error: error?.message || error });
+      reconnectSocket('websocket_error', null).catch((error) => logError('ws.error reconnect failed', { error: error?.message || error }));
+    });
 
-  sock.ev.on('stream.error', (error) => {
-    logError('[WA][STATE] Stream error', { error: error?.message || error });
-    reconnectSocket('stream_error', null).catch((error) => logError('stream.error reconnect failed', { error: error?.message || error }));
-  });
+    sock.ev.removeAllListeners?.('stream.error');
+    sock.ev.on('stream.error', (error) => {
+      logError('[WA][STATE] Stream error', { error: error?.message || error });
+      reconnectSocket('stream_error', null).catch((error) => logError('stream.error reconnect failed', { error: error?.message || error }));
+    });
 
+    // heartbeat
+    if (!heartbeatTimer) {
+      heartbeatTimer = setInterval(() => {
+        const now = Date.now();
+        const wsReady = sock?.ws?.readyState;
+        const healthy = Boolean(sock && wsReady === 1);
+        const idleMs = now - lastActivityAt;
 
-  if (!heartbeatTimer) {
-    heartbeatTimer = setInterval(() => {
-      const now = Date.now();
-      const wsReady = sock?.ws?.readyState;
-      const healthy = Boolean(sock && wsReady === 1);
-      const idleMs = now - lastActivityAt;
+        if (!healthy || idleMs > HEARTBEAT_INTERVAL_MS * 2) {
+          heartbeatUnhealthyCount += 1;
+          logWarn('[WA][HEARTBEAT] Unhealthy check', {
+            attempt: heartbeatUnhealthyCount,
+            threshold: HEARTBEAT_UNHEALTHY_THRESHOLD,
+            wsReadyState: wsReady,
+            idleMs,
+            lastState: lastSocketHealth?.state,
+            memory: getMemoryUsage(),
+            cpu: getCpuUsage(),
+          });
 
-      if (!healthy || idleMs > HEARTBEAT_INTERVAL_MS * 2) {
-        heartbeatUnhealthyCount += 1;
-        logWarn('[WA][HEARTBEAT] Unhealthy check', {
-          attempt: heartbeatUnhealthyCount,
-          threshold: HEARTBEAT_UNHEALTHY_THRESHOLD,
-          wsReadyState: wsReady,
-          idleMs,
-          lastState: lastSocketHealth?.state,
-          memory: getMemoryUsage(),
-          cpu: getCpuUsage(),
-        });
-
-        if (heartbeatUnhealthyCount >= HEARTBEAT_UNHEALTHY_THRESHOLD) {
-          logWarn('[WA][HEARTBEAT] Threshold reached; scheduling reconnect', { heartbeatUnhealthyCount });
-          heartbeatUnhealthyCount = 0;
-          if (connectionState !== ConnectionStates.AWAITING_PAIRING_CODE) {
-            reconnectSocket('heartbeat_unhealthy', null).catch((error) => logError('heartbeat reconnect failed', { error: error?.message || error }));
+          if (heartbeatUnhealthyCount >= HEARTBEAT_UNHEALTHY_THRESHOLD) {
+            logWarn('[WA][HEARTBEAT] Threshold reached; scheduling reconnect', { heartbeatUnhealthyCount });
+            heartbeatUnhealthyCount = 0;
+            if (connectionState !== ConnectionStates.AWAITING_PAIRING_CODE) {
+              reconnectSocket('heartbeat_unhealthy', null).catch((error) => logError('heartbeat reconnect failed', { error: error?.message || error }));
+            }
           }
+          return;
         }
-        return;
-      }
 
-      heartbeatUnhealthyCount = 0;
-      logInfo('[WA][HEARTBEAT] Healthy', { wsReadyState: wsReady, idleMs, memory: getMemoryUsage(), cpu: getCpuUsage() });
-      lastSocketHealth = { timestamp: now, state: 'healthy' };
-    }, HEARTBEAT_INTERVAL_MS);
-  }
-
-  async function handleUpsertEvent(sock, event) {
-    try {
-      const m = event?.messages?.[0];
-
-      if (!m || !m.key) return;
-
-      const msgId = m.key?.id;
-      if (!msgId) return;
-      if (messageCache.has(msgId)) return;
-      messageCache.set(msgId, true);
-
-      if (m.key?.fromMe) return;
-
-      const fromJid = m.key.remoteJid;
-      if (!fromJid) return;
-      if (fromJid.endsWith('@broadcast') || fromJid.endsWith('broadcast')) return;
-
-      const body = extractMessageText(m);
-      if (!body && !m.message?.imageMessage && !m.message?.videoMessage) return;
-
-      const senderId = m.key.participant || fromJid;
-      const textForTrigger = String(body ?? '').toLowerCase();
-      if (!textForTrigger.includes('nezuko')) {
-        logInfo('[SKIP] No trigger', { sender: senderId });
-        return;
-      }
-      logInfo('[TRIGGERED] Nezuko activated', { sender: senderId });
-
-      if (isRateLimited(senderId)) {
-        logWarn('Rate limited sender:', senderId);
-        return;
-      }
-
-      let pendingAckMessage = null;
-
-      try {
-        pendingAckMessage = await sock.sendMessage(fromJid, { text: '⏳' });
-        logInfo('[WA][OUTBOUND] Ack sent', { chat: fromJid });
-      } catch (error) {
-        logWarn('[WA][OUTBOUND] Ack failed', { error: error?.message || error });
-      }
-
-      const ownerHandled = await handleOwnerCommand(sock, m, body);
-      if (ownerHandled) return;
-
-      const payload = await normalizeWhatsAppMessage(sock, { ...m, messageText: body });
-      logInfo('[WA][INBOUND] Message received', { chat: payload.chat_id, sender: payload.platform_id, length: payload.message?.length || 0 });
-
-      const apiRes = await forwardToFastAPI(payload);
-      if (!apiRes) return;
-      if (apiRes.status !== 'success') {
-        const reason = apiRes.reason || 'unknown';
-        logInfo('FastAPI ignored message.', { reason, chat: payload.chat_id });
-        return;
-      }
-
-      const replyText = (apiRes.reply ?? '').toString().trim();
-
-      try {
-        if (pendingAckMessage?.key) {
-          await sock.sendMessage(fromJid, { delete: pendingAckMessage.key });
-          logInfo('[WA][OUTBOUND] Ack deleted', { chat: fromJid });
-        }
-      } catch (deleteErr) {
-        logWarn('Failed to delete pending ack message', { error: deleteErr?.message || deleteErr });
-      }
-
-      if (!replyText) {
-        await sock.sendMessage(payload.chat_id, { text: process.env.FASTAPI_FALLBACK_REPLY || 'Sorry! 😭' });
-        return;
-      }
-
-      await sock.sendMessage(payload.chat_id, { text: replyText }, { quoted: m });
-      logInfo('[WA][OUTBOUND] Reply sent', { chat: payload.chat_id, length: replyText.length });
-    } catch (error) {
-      logError('messages.upsert handler error', { message: error?.message, stack: error?.stack });
+        heartbeatUnhealthyCount = 0;
+        logInfo('[WA][HEARTBEAT] Healthy', { wsReadyState: wsReady, idleMs, memory: getMemoryUsage(), cpu: getCpuUsage() });
+        lastSocketHealth = { timestamp: now, state: 'healthy' };
+      }, HEARTBEAT_INTERVAL_MS);
     }
-  }
+
+    // helper for messages.upsert processing retained below
+    async function handleUpsertEvent(sock, event) {
+      try {
+        const m = event?.messages?.[0];
+
+        if (!m || !m.key) return;
+
+        const msgId = m.key?.id;
+        if (!msgId) return;
+        if (messageCache.has(msgId)) return;
+        messageCache.set(msgId, true);
+
+        if (m.key?.fromMe) return;
+
+        const fromJid = m.key.remoteJid;
+        if (!fromJid) return;
+        if (fromJid.endsWith('@broadcast') || fromJid.endsWith('broadcast')) return;
+
+        const body = extractMessageText(m);
+        if (!body && !m.message?.imageMessage && !m.message?.videoMessage) return;
+
+        const senderId = m.key.participant || fromJid;
+        const textForTrigger = String(body ?? '').toLowerCase();
+        if (!textForTrigger.includes('nezuko')) {
+          logInfo('[SKIP] No trigger', { sender: senderId });
+          return;
+        }
+        logInfo('[TRIGGERED] Nezuko activated', { sender: senderId });
+
+        if (isRateLimited(senderId)) {
+          logWarn('Rate limited sender:', senderId);
+          return;
+        }
+
+        let pendingAckMessage = null;
+
+        try {
+          pendingAckMessage = await sock.sendMessage(fromJid, { text: '⏳' });
+          logInfo('[WA][OUTBOUND] Ack sent', { chat: fromJid });
+        } catch (error) {
+          logWarn('[WA][OUTBOUND] Ack failed', { error: error?.message || error });
+        }
+
+        const ownerHandled = await handleOwnerCommand(sock, m, body);
+        if (ownerHandled) return;
+
+        const payload = await normalizeWhatsAppMessage(sock, { ...m, messageText: body });
+        logInfo('[WA][INBOUND] Message received', { chat: payload.chat_id, sender: payload.platform_id, length: payload.message?.length || 0 });
+
+        const apiRes = await forwardToFastAPI(payload);
+        if (!apiRes) return;
+        if (apiRes.status !== 'success') {
+          const reason = apiRes.reason || 'unknown';
+          logInfo('FastAPI ignored message.', { reason, chat: payload.chat_id });
+          return;
+        }
+
+        const replyText = (apiRes.reply ?? '').toString().trim();
+
+        try {
+          if (pendingAckMessage?.key) {
+            await sock.sendMessage(fromJid, { delete: pendingAckMessage.key });
+            logInfo('[WA][OUTBOUND] Ack deleted', { chat: fromJid });
+          }
+        } catch (deleteErr) {
+          logWarn('Failed to delete pending ack message', { error: deleteErr?.message || deleteErr });
+        }
+
+        if (!replyText) {
+          await sock.sendMessage(payload.chat_id, { text: process.env.FASTAPI_FALLBACK_REPLY || 'Sorry! 😭' });
+          return;
+        }
+
+        await sock.sendMessage(payload.chat_id, { text: replyText }, { quoted: m });
+        logInfo('[WA][OUTBOUND] Reply sent', { chat: payload.chat_id, length: replyText.length });
+      } catch (error) {
+        logError('messages.upsert handler error', { message: error?.message, stack: error?.stack });
+      }
+    }
   })();
   return startPromise;
 }
