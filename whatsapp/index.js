@@ -36,6 +36,38 @@ const QR_PUBLIC_URL = process.env.RENDER_EXTERNAL_URL
   ? `${process.env.RENDER_EXTERNAL_URL.replace(/\/$/, '')}/qr`
   : '/qr';
 
+const ConnectionStates = {
+  IDLE: 'IDLE',
+  CONNECTING: 'CONNECTING',
+  WAITING_FOR_QR: 'WAITING_FOR_QR',
+  SCANNING: 'SCANNING',
+  CONNECTED: 'CONNECTED',
+  RECONNECTING: 'RECONNECTING',
+  DISCONNECTED: 'DISCONNECTED',
+};
+
+let connectionState = ConnectionStates.IDLE;
+let isConnecting = false;
+let lastActivityAt = Date.now();
+
+function setConnectionState(nextState) {
+  if (connectionState === nextState) return;
+  logInfo('[WA][STATE] State transition', { from: connectionState, to: nextState });
+  connectionState = nextState;
+}
+
+function isSocketOpen() {
+  return Boolean(socket && socket.ws && socket.ws.readyState === 1);
+}
+
+function isSocketPresent() {
+  return Boolean(socket);
+}
+
+function markActivity() {
+  lastActivityAt = Date.now();
+}
+
 function clearLatestQR() {
   if (qrExpiryTimer) {
     clearTimeout(qrExpiryTimer);
@@ -55,7 +87,7 @@ function storeLatestQR(pngBuffer) {
 }
 
 function isWhatsAppConnected() {
-  return Boolean(socket && socket.ws && socket.ws.readyState === 1 && lastSocketHealth?.state === 'open');
+  return Boolean(isSocketOpen() && lastSocketHealth?.state === 'open');
 }
 
 function isQRAvailable() {
@@ -67,6 +99,22 @@ function getQRStatusPayload() {
     connected: isWhatsAppConnected(),
     hasQR: isQRAvailable(),
   };
+}
+
+function shouldStartSocket() {
+  if (isShuttingDown) {
+    logInfo('Socket start skipped: shutting down');
+    return false;
+  }
+  if (isSocketPresent()) {
+    logInfo('Socket start skipped: socket already exists');
+    return false;
+  }
+  if (isConnecting) {
+    logInfo('Socket start skipped: already connecting');
+    return false;
+  }
+  return true;
 }
 
 // QR API
@@ -470,21 +518,24 @@ async function saveStateSafely(saveCreds) {
 
 function shouldReconnect(reason, lastDisconnect) {
   if (isShuttingDown) return false;
-  // If we're still starting or connecting, avoid reconnect storms
-  if (lastSocketHealth?.state === 'starting' || lastSocketHealth?.state === 'connecting') return false;
-  // If a QR is active and not expired, wait for scan before reconnecting
-  if (isQRAvailable()) return false;
+  if (connectionState === ConnectionStates.CONNECTING || connectionState === ConnectionStates.RECONNECTING) return false;
+  if (isQRAvailable()) {
+    logInfo('Reconnect skipped: waiting for QR scan');
+    return false;
+  }
   if (reason === 'logout') return false;
   if (lastDisconnect?.error?.output?.statusCode === DisconnectReason.loggedOut) return false;
-  if (lastDisconnect?.error?.output?.statusCode === DisconnectReason.connectionReplaced) return true;
+  if (reason === 'bad_session') return false;
   if (reason === 'connection_replaced') return true;
-  if (reason === 'network_lost' || reason === 'stream_error' || reason === 'restart_required' || reason === 'timeout') return true;
-  return true;
+  if (lastDisconnect?.error?.output?.statusCode === DisconnectReason.connectionReplaced) return true;
+  if (reason === 'network_lost' || reason === 'stream_error' || reason === 'restart_required' || reason === 'timeout' || reason === 'websocket_closed' || reason === 'unhandled_rejection' || reason === 'uncaught_exception' || reason === 'heartbeat_unhealthy') return true;
+  return false;
 }
 
+const RECONNECT_BACKOFF_MS = [1000, 2000, 5000, 10000, 20000, 30000];
 function getReconnectDelay(attempt) {
-  const capped = Math.min(RECONNECT_BASE_DELAY_MS * 2 ** (attempt - 1), RECONNECT_MAX_DELAY_MS);
-  return capped + Math.floor(Math.random() * 1000);
+  const index = Math.min(attempt - 1, RECONNECT_BACKOFF_MS.length - 1);
+  return Math.min(RECONNECT_BACKOFF_MS[index], RECONNECT_MAX_DELAY_MS) + Math.floor(Math.random() * 500);
 }
 
 async function stopSocket(reason = 'shutdown') {
@@ -520,12 +571,6 @@ async function reconnectSocket(reason = 'unknown', lastDisconnect) {
     return;
   }
 
-  // If socket appears healthy, skip reconnect
-  if (socket && (socket.ws?.readyState === 1 || lastSocketHealth?.state === 'open' || socket?.user?.id)) {
-    logInfo('Reconnect skipped: socket already healthy', { reason, readyState: socket.ws?.readyState, lastState: lastSocketHealth?.state });
-    return;
-  }
-
   if (!shouldReconnect(reason, lastDisconnect)) {
     logInfo('Reconnect skipped by shouldReconnect', { reason, statusCode: lastDisconnect?.error?.output?.statusCode });
     return;
@@ -536,7 +581,13 @@ async function reconnectSocket(reason = 'unknown', lastDisconnect) {
     return;
   }
 
+  if (isSocketPresent() && isSocketOpen()) {
+    logInfo('Reconnect skipped: active socket still open', { reason });
+    return;
+  }
+
   isReconnecting = true;
+  setConnectionState(ConnectionStates.RECONNECTING);
   reconnectAttempts += 1;
   const attempt = reconnectAttempts;
   const delay = getReconnectDelay(attempt);
@@ -551,6 +602,7 @@ async function reconnectSocket(reason = 'unknown', lastDisconnect) {
       await stopSocket('reconnect');
       await start();
       isReconnecting = false;
+      logInfo('Reconnect completed', { attempt });
     } catch (error) {
       logError('Reconnect failed', { attempt, error: error?.message || error, stack: error?.stack });
       isReconnecting = false;
@@ -565,38 +617,44 @@ async function reconnectSocket(reason = 'unknown', lastDisconnect) {
 }
 
 async function start() {
-  if (isShuttingDown) return;
-  if (socket) {
-    logInfo('Socket already exists; skipping duplicate start');
-    return;
-  }
+  if (!shouldStartSocket()) return;
+  isConnecting = true;
+  setConnectionState(ConnectionStates.CONNECTING);
 
   logInfo('Starting Baileys socket...', { authDir: AUTH_DIR, memory: getMemoryUsage() });
 
-  await ensureAuthDir();
+  try {
+    await ensureAuthDir();
 
-  const logger = pino({ level: process.env.BAILEYS_LOG_LEVEL || 'info' });
+    const logger = pino({ level: process.env.BAILEYS_LOG_LEVEL || 'info' });
 
-  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
-  authState = state;
+    const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+    authState = state;
 
-  const { version } = await fetchLatestBaileysVersion();
+    const { version } = await fetchLatestBaileysVersion();
 
-  const sock = makeWASocket({
-    logger,
-    auth: {
-      creds: state.creds,
-      keys: makeCacheableSignalKeyStore(state.keys, logger),
-    },
-    version,
-    browser: Browsers.ubuntu('Chrome'),
-    syncFullHistory: false,
-    markOnlineOnConnect: true,
-  });
+    const sock = makeWASocket({
+      logger,
+      auth: {
+        creds: state.creds,
+        keys: makeCacheableSignalKeyStore(state.keys, logger),
+      },
+      version,
+      browser: Browsers.ubuntu('Chrome'),
+      syncFullHistory: false,
+      markOnlineOnConnect: true,
+    });
 
-  socket = sock;
-  isReconnecting = false;
-  lastSocketHealth = { timestamp: Date.now(), state: 'starting' };
+    socket = sock;
+    isReconnecting = false;
+    lastSocketHealth = { timestamp: Date.now(), state: 'starting' };
+    markActivity();
+  } catch (error) {
+    logError('Start failed', { error: error?.message || error, stack: error?.stack });
+    throw error;
+  } finally {
+    isConnecting = false;
+  }
 
   sock.ev.on('creds.update', async () => {
     try {
@@ -621,15 +679,23 @@ async function start() {
 
       if (qr) {
         try {
+          setConnectionState(ConnectionStates.WAITING_FOR_QR);
           const dataUrl = await qrcode.toDataURL(qr, { errorCorrectionLevel: 'M', margin: 1, scale: 6 });
           const pngBuffer = Buffer.from(dataUrl.split(',')[1], 'base64');
           const prev = latestQR;
           storeLatestQR(pngBuffer);
           logInfo('[WA][QR] New QR generated. Open:', { url: QR_PUBLIC_URL });
-          if (!prev || !prev.png.equals(pngBuffer)) logInfo('[WA][QR] QR updated', { ageMs: 0 });
+          if (!prev || !prev.png.equals(pngBuffer)) {
+            logInfo('[WA][QR] QR updated', { ageMs: 0 });
+          }
         } catch (error) {
           logError('[WA][QR] QR handling error', { error: error?.message || error });
         }
+      }
+
+      if (connection === 'connecting') {
+        setConnectionState(ConnectionStates.CONNECTING);
+        logInfo('[WA][STATE] Connecting');
       }
 
       if (connection === 'open') {
@@ -637,6 +703,8 @@ async function start() {
         isReconnecting = false;
         heartbeatUnhealthyCount = 0;
         lastSocketHealth = { timestamp: Date.now(), state: 'open' };
+        setConnectionState(ConnectionStates.CONNECTED);
+        markActivity();
         logInfo('[WA][STATE] Connected', { isOnline, isNewLogin, receivedPendingNotifications });
         if (latestQR) {
           logInfo('[WA][QR] Clearing stored QR due to successful connection');
@@ -648,8 +716,33 @@ async function start() {
       if (connection === 'close') {
         const statusCode = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.output?.status || null;
         const reason = lastDisconnect?.error?.output?.payload?.message || lastDisconnect?.error?.message || 'unknown';
+        lastSocketHealth = { timestamp: Date.now(), state: 'closed' };
+        setConnectionState(ConnectionStates.DISCONNECTED);
+        logWarn('[WA][STATE] Disconnected', { statusCode, reason, lastDisconnect });
+
+        if (statusCode === DisconnectReason.loggedOut || reason === 'bad_session' || reason === 'connection_replaced') {
+          logError('[WA][STATE] Permanent disconnect detected; clearing auth and QR', { statusCode, reason });
+          clearLatestQR();
+          if (statusCode === DisconnectReason.loggedOut || reason === 'bad_session') {
+            try {
+              await stopSocket('logout_or_bad_session');
+            } catch (error) {
+              logError('Error during permanent disconnect cleanup', { error: error?.message || error });
+            }
+          }
+          return;
+        }
+
+        if (statusCode === DisconnectReason.restartRequired || reason?.includes('restart_required') || statusCode === 515) {
+          logWarn('[WA][STATE] Restart required detected', { statusCode, reason });
+          // don't reconnect while QR waiting; if QR is present, wait for scan or expiry
+          if (isQRAvailable()) {
+            logInfo('Restart required but QR pending; delaying reconnect until after QR lifecycle');
+            return;
+          }
+        }
+
         const shouldReconnectNow = shouldReconnect('connection_closed', lastDisconnect);
-        logWarn('[WA][STATE] Disconnected', { shouldReconnectNow, statusCode, reason, lastDisconnect });
         if (shouldReconnectNow) {
           await reconnectSocket('connection_closed', lastDisconnect);
         }
@@ -682,30 +775,21 @@ async function start() {
     reconnectSocket('stream_error', null).catch((error) => logError('stream.error reconnect failed', { error: error?.message || error }));
   });
 
-  sock.ev.on('connection.update', (update) => {
-    if (update?.connection === 'connecting') logInfo('[WA][STATE] Connecting');
-  });
-
-  sock.ev.on('creds.update', () => {
-    logInfo('[WA][AUTH] Auth state changed');
-  });
 
   if (!heartbeatTimer) {
     heartbeatTimer = setInterval(() => {
       const now = Date.now();
-
       const wsReady = socket?.ws?.readyState;
-      const hasUser = Boolean(socket?.user?.id);
-      // Consider healthy if websocket is OPEN, or we recently had an 'open' connection state, or socket reports user id
-      const healthy = Boolean(socket && (wsReady === 1 || lastSocketHealth?.state === 'open' || hasUser));
+      const healthy = Boolean(socket && wsReady === 1);
+      const idleMs = now - lastActivityAt;
 
-      if (!healthy) {
+      if (!healthy || idleMs > HEARTBEAT_INTERVAL_MS * 2) {
         heartbeatUnhealthyCount += 1;
         logWarn('[WA][HEARTBEAT] Unhealthy check', {
           attempt: heartbeatUnhealthyCount,
           threshold: HEARTBEAT_UNHEALTHY_THRESHOLD,
-          hasSocket: Boolean(socket),
           wsReadyState: wsReady,
+          idleMs,
           lastState: lastSocketHealth?.state,
           memory: getMemoryUsage(),
           cpu: getCpuUsage(),
@@ -714,14 +798,15 @@ async function start() {
         if (heartbeatUnhealthyCount >= HEARTBEAT_UNHEALTHY_THRESHOLD) {
           logWarn('[WA][HEARTBEAT] Threshold reached; scheduling reconnect', { heartbeatUnhealthyCount });
           heartbeatUnhealthyCount = 0;
-          reconnectSocket('heartbeat_unhealthy', null).catch((error) => logError('heartbeat reconnect failed', { error: error?.message || error }));
+          if (!isQRAvailable()) {
+            reconnectSocket('heartbeat_unhealthy', null).catch((error) => logError('heartbeat reconnect failed', { error: error?.message || error }));
+          }
         }
         return;
       }
 
-      // healthy
       heartbeatUnhealthyCount = 0;
-      logInfo('[WA][HEARTBEAT] Healthy', { wsReadyState: wsReady, memory: getMemoryUsage(), cpu: getCpuUsage() });
+      logInfo('[WA][HEARTBEAT] Healthy', { wsReadyState: wsReady, idleMs, memory: getMemoryUsage(), cpu: getCpuUsage() });
       lastSocketHealth = { timestamp: now, state: 'healthy' };
     }, HEARTBEAT_INTERVAL_MS);
   }
