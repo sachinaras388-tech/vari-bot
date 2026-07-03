@@ -570,6 +570,11 @@ async function start() {
     try {
       await ensureAuthDir();
 
+        // Warn if WA_AUTH_DIR not explicitly configured (likely ephemeral on some hosts)
+        if (!process.env.WA_AUTH_DIR) {
+          logWarn('[AUTH] WA_AUTH_DIR not set; auth may not survive deploys. Set WA_AUTH_DIR to a persistent disk path on Render.');
+        }
+
       const logger = pino({ level: process.env.BAILEYS_LOG_LEVEL || 'info' });
 
       const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
@@ -596,14 +601,30 @@ async function start() {
       lastSocketHealth = { timestamp: Date.now(), state: 'starting' };
       markActivity();
 
-      // register saveCreds directly so Baileys persists credentials safely
+      // register a single creds.update handler that persists and verifies writes
       try {
-        if (typeof saveCredsFn === 'function') {
-          sock.ev.on('creds.update', saveCredsFn);
-          logInfo('[AUTH] Registered creds.update handler');
-        } else {
-          logWarn('[AUTH] saveCredsFn is not a function; creds.update not registered');
-        }
+        // remove previous handlers to avoid duplicates
+        sock.ev.removeAllListeners?.('creds.update');
+
+        const saveCredsHandler = async () => {
+          try {
+            if (typeof saveCredsFn === 'function') {
+              await saveCredsFn();
+            }
+
+            // also write a simplified creds.json for quick checks and recovery
+            if (authState?.creds) {
+              const statePath = path.join(AUTH_DIR, 'creds.json');
+              fs.writeFileSync(statePath, JSON.stringify(authState.creds, null, 2));
+              logInfo('[AUTH] Auth saved to disk', { path: statePath });
+            }
+          } catch (err) {
+            logError('[AUTH] saveCreds handler failed', { error: err?.message || err });
+          }
+        };
+
+        sock.ev.on('creds.update', saveCredsHandler);
+        logInfo('[AUTH] Registered single creds.update handler');
       } catch (err) {
         logWarn('[AUTH] Failed to register creds.update handler', { error: err?.message || err });
       }
@@ -617,6 +638,8 @@ async function start() {
     }
 
     // Consolidated connection.update handler with detailed logging
+    // Ensure single registration
+    sock.ev.removeAllListeners?.('connection.update');
     sock.ev.on('connection.update', async (update) => {
     try {
       const { connection, lastDisconnect, qr, receivedPendingNotifications, isOnline, isNewLogin } = update;
@@ -723,6 +746,7 @@ async function start() {
         setConnectionState(ConnectionStates.DISCONNECTED);
         logWarn('[WA][STATE] Disconnected', { statusCode, reason, lastDisconnect });
 
+        // Handle specific status codes
         if (statusCode === DisconnectReason.loggedOut || statusCode === 401 || reason?.toLowerCase().includes('logged out') || reason?.toLowerCase().includes('401')) {
           logError('[WA][STATE] Invalid or logged out credentials detected; clearing auth state', { statusCode, reason });
           try {
@@ -740,6 +764,7 @@ async function start() {
           // In pairing-mode, immediately restart to generate a new pairing code.
           if (USE_PAIRING_CODE) {
             pairingCodeRequested = false;
+            logInfo('[RECONNECT] Restarting immediately to generate new pairing code (pairing-mode)');
             setTimeout(() => start().catch((err) => logError('start after loggedOut failed', { error: err?.message || err })), 200);
           } else {
             reconnectSocket('invalid_credentials', lastDisconnect);
@@ -747,7 +772,7 @@ async function start() {
           return;
         }
 
-        if (statusCode === DisconnectReason.restartRequired || reason?.includes('restart_required') || statusCode === 515) {
+        if (statusCode === DisconnectReason.restartRequired || reason?.includes('restart_required')) {
           logWarn('[WA][STATE] Restart required detected', { statusCode, reason });
 
           // perform a controlled restart: stop socket, save creds, then reconnect with backoff
@@ -766,6 +791,26 @@ async function start() {
 
           // schedule reconnect (use reconnectSocket which enforces backoff and guards)
           reconnectSocket('restart_required', lastDisconnect);
+          return;
+        }
+
+        // transient errors -> reconnect
+        if ([408, 428, 440, 500].includes(Number(statusCode))) {
+          logWarn('[WA][STATE] Transient status code, scheduling reconnect', { statusCode });
+          reconnectSocket('transient_error', lastDisconnect);
+          return;
+        }
+
+        // Stream Errored -> recreate socket cleanly
+        if (Number(statusCode) === 515 || reason?.toLowerCase().includes('stream errored') || reason?.toLowerCase().includes('stream_error')) {
+          logWarn('[WA][STATE] Stream errored (515) detected; rebuilding socket', { statusCode, reason });
+          try {
+            await stopSocket('stream_errored_515');
+          } catch (e) {
+            logWarn('[WA] stopSocket failed during 515 handling', { error: e?.message || e });
+          }
+          // small delay then start fresh
+          setTimeout(() => start().catch((err) => logError('start after 515 failed', { error: err?.message || err })), 1000);
           return;
         }
 
