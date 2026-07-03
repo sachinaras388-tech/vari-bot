@@ -162,6 +162,8 @@ let pendingCredsSave = false;
 // start lock to prevent concurrent starts
 let startInProgress = false;
 let startPromise = null;
+// pairing-mode flag: when true only phone-number pairing is allowed (no QR)
+const USE_PAIRING_CODE = String(process.env.USE_PAIRING_CODE || 'false').toLowerCase() === 'true';
 
 // ---------- Logging helpers ----------
 function logInfo(msg, obj) {
@@ -626,48 +628,77 @@ async function start() {
         userId: sock?.user?.id,
       });
 
-      if (qr) {
-        logWarn('[WA][AUTH] Unexpected QR payload received while using pairing auth; ignoring QR data');
+      // If QR data is present but we're running in pairing-code mode, ignore any QR payloads.
+      if (qr && !USE_PAIRING_CODE) {
+        logInfo('[WA][AUTH] QR payload received (QR-mode active)');
       }
 
       if (connection === 'connecting') {
         setConnectionState(ConnectionStates.CONNECTING);
         logInfo('[WA][STATE] Connecting');
-
-        // Only request pairing code when socket is ready and we truly have no usable credentials.
+        // Pairing-mode: only use phone-number pairing (no QR). If USE_PAIRING_CODE=false then QR mode allowed.
         try {
-          const hasCredFiles = fs.existsSync(path.join(AUTH_DIR, 'creds.json')) || (authState && Object.keys(authState.creds || {}).length > 0);
-          if (hasCredFiles) {
-            logInfo('[AUTH] Existing credentials found; skipping pairing code request', { authDir: AUTH_DIR });
-          } else if (pairingCodeRequested) {
-            logInfo('[AUTH] Pairing code already requested; skipping duplicate');
-          } else if (!sock || typeof sock.requestPairingCode !== 'function') {
-            logWarn('[AUTH] requestPairingCode unavailable on socket yet; will wait for a later update');
-          } else if (typeof saveCredsFn !== 'function') {
-            logWarn('[AUTH] saveCreds unavailable; not requesting pairing code to avoid loss of creds');
-          } else {
-            // mark requested only when we are about to perform the call to avoid races
-            logInfo('[AUTH] Requesting pairing code (safe-guarded)');
-            pairingCodeRequested = true;
-            // slight delay to ensure socket internals are ready
-            await new Promise((r) => setTimeout(r, 250));
-            try {
-              const pairingCode = await sock.requestPairingCode(phoneNumber);
-              console.log('==================================');
-              console.log('WHATSAPP PAIRING CODE');
-              console.log('');
-              console.log(pairingCode);
-              console.log('');
-              console.log('Open WhatsApp');
-              console.log('Linked Devices');
-              console.log('Link with Phone Number');
-              console.log('Enter the code above');
-              console.log('==================================');
-              logInfo('[AUTH] Pairing code generated', { pairingCode: safeSlice(pairingCode, 200) });
-            } catch (error) {
+          const credsExist = Boolean(authState && authState.creds && Object.keys(authState.creds || {}).length > 0);
+          const credsRegistered = Boolean(authState?.creds?.registered === true);
+
+          if (USE_PAIRING_CODE) {
+            // If credentials exist and are registered -> skip pairing
+            if (credsRegistered) {
+              logInfo('[AUTH] Valid credentials present; skipping pairing', { authDir: AUTH_DIR });
+            } else if (credsExist && !credsRegistered) {
+              // Credentials present but not registered -> treat as invalid: clear and restart to request new pairing
+              logWarn('[AUTH] Credentials present but not registered; clearing and re-requesting pairing', { authDir: AUTH_DIR });
+              try {
+                await clearAuthState();
+              } catch (e) {
+                logWarn('[AUTH] clearAuthState failed', { error: e?.message || e });
+              }
+
+              try {
+                // stop current socket and immediately start a fresh socket so pairing code will be generated
+                await stopSocket('invalid_credentials_pairing');
+              } catch (e) {
+                logWarn('[AUTH] stopSocket failed after clearing creds', { error: e?.message || e });
+              }
+
+              // reset pairing flag and schedule immediate start to generate new pairing code
               pairingCodeRequested = false;
-              logError('[AUTH] requestPairingCode failed', { error: error?.message || error });
+              setTimeout(() => start().catch((err) => logError('start after clearAuth failed', { error: err?.message || err })), 200);
+            } else {
+              // No credentials: request pairing code when socket exposes the function
+              if (pairingCodeRequested) {
+                logInfo('[AUTH] Pairing code already requested; skipping duplicate');
+              } else if (!sock || typeof sock.requestPairingCode !== 'function') {
+                logWarn('[AUTH] requestPairingCode unavailable on socket yet; will wait for a later update');
+              } else if (typeof saveCredsFn !== 'function') {
+                logWarn('[AUTH] saveCredsFn unavailable; not requesting pairing code to avoid loss of creds');
+              } else {
+                logInfo('[AUTH] Requesting pairing code (pairing-mode)');
+                pairingCodeRequested = true;
+                setConnectionState(ConnectionStates.AWAITING_PAIRING_CODE);
+                await new Promise((r) => setTimeout(r, 250));
+                try {
+                  const pairingCode = await sock.requestPairingCode(phoneNumber);
+                  console.log('==================================');
+                  console.log('WHATSAPP PAIRING CODE');
+                  console.log('');
+                  console.log(pairingCode);
+                  console.log('');
+                  console.log('Open WhatsApp');
+                  console.log('Linked Devices');
+                  console.log('Link with Phone Number');
+                  console.log('Enter the code above');
+                  console.log('==================================');
+                  logInfo('[AUTH] Pairing code generated', { pairingCode: safeSlice(pairingCode, 200) });
+                } catch (error) {
+                  pairingCodeRequested = false;
+                  logError('[AUTH] requestPairingCode failed', { error: error?.message || error });
+                }
+              }
             }
+          } else {
+            // QR-mode or default behavior: if QR present and available, the app can handle it elsewhere.
+            logInfo('[AUTH] Non-pairing mode: QR handling may occur (not modified)');
           }
         } catch (err) {
           logWarn('[AUTH] Error while deciding to request pairing code', { error: err?.message || err });
@@ -706,7 +737,13 @@ async function start() {
             logWarn('Error stopping socket after invalid credentials', { error: error?.message || error });
           }
 
-          reconnectSocket('invalid_credentials', lastDisconnect);
+          // In pairing-mode, immediately restart to generate a new pairing code.
+          if (USE_PAIRING_CODE) {
+            pairingCodeRequested = false;
+            setTimeout(() => start().catch((err) => logError('start after loggedOut failed', { error: err?.message || err })), 200);
+          } else {
+            reconnectSocket('invalid_credentials', lastDisconnect);
+          }
           return;
         }
 
