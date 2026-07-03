@@ -7,7 +7,6 @@ const dns = require('dns');
 const fs = require('fs');
 const path = require('path');
 const NodeCache = require('node-cache');
-const qrcode = require('qrcode');
 
 const pino = require('pino');
 const {
@@ -21,26 +20,42 @@ const {
 
 dns.setServers(['8.8.8.8', '8.8.4.4']);
 
+const phoneNumber = String(process.env.WHATSAPP_PHONE_NUMBER || '').trim();
+const nodeEnv = String(process.env.NODE_ENV || '').trim();
+const portValue = Number(process.env.PORT);
+
+if (!phoneNumber) {
+  console.error('[WA][FATAL] Missing required environment variable: WHATSAPP_PHONE_NUMBER');
+  process.exit(1);
+}
+
+if (!/^[0-9]{10,15}$/.test(phoneNumber)) {
+  console.error('[WA][FATAL] WHATSAPP_PHONE_NUMBER must contain only digits and include country code');
+  process.exit(1);
+}
+
+if (!nodeEnv) {
+  console.error('[WA][FATAL] Missing required environment variable: NODE_ENV');
+  process.exit(1);
+}
+
+if (!Number.isInteger(portValue) || portValue <= 0) {
+  console.error('[WA][FATAL] Missing or invalid required environment variable: PORT');
+  process.exit(1);
+}
+
 // ---------- Dummy Server for Render ----------
 const app = express();
+app.use(express.json());
 app.get('/', (req, res) => res.send('Nezuko Bot is Awake! 🌸'));
 app.get('/health', (req, res) => res.json({ status: 'ok', uptime: process.uptime() }));
-const PORT = process.env.PORT || 3000;
+const PORT = portValue;
 const server = app.listen(PORT, () => console.log(`[WA][INFO] Dummy server listening on port ${PORT}`));
-
-// QR storage and expiry
-let latestQR = null; // { png: Buffer, ts: number }
-let qrExpiryTimer = null;
-const QR_EXPIRE_MS = Number(process.env.QR_EXPIRE_MS || 1000 * 60 * 5); // 5 minutes
-const QR_PUBLIC_URL = process.env.RENDER_EXTERNAL_URL
-  ? `${process.env.RENDER_EXTERNAL_URL.replace(/\/$/, '')}/qr`
-  : '/qr';
 
 const ConnectionStates = {
   IDLE: 'IDLE',
   CONNECTING: 'CONNECTING',
-  WAITING_FOR_QR: 'WAITING_FOR_QR',
-  SCANNING: 'SCANNING',
+  AWAITING_PAIRING_CODE: 'AWAITING_PAIRING_CODE',
   CONNECTED: 'CONNECTED',
   RECONNECTING: 'RECONNECTING',
   DISCONNECTED: 'DISCONNECTED',
@@ -68,37 +83,8 @@ function markActivity() {
   lastActivityAt = Date.now();
 }
 
-function clearLatestQR() {
-  if (qrExpiryTimer) {
-    clearTimeout(qrExpiryTimer);
-    qrExpiryTimer = null;
-  }
-  latestQR = null;
-}
-
-function storeLatestQR(pngBuffer) {
-  clearLatestQR();
-  latestQR = { png: pngBuffer, ts: Date.now() };
-  qrExpiryTimer = setTimeout(() => {
-    logInfo('[WA][QR] Stored QR expired and cleared');
-    latestQR = null;
-    qrExpiryTimer = null;
-  }, QR_EXPIRE_MS);
-}
-
 function isWhatsAppConnected() {
   return Boolean(isSocketOpen() && lastSocketHealth?.state === 'open');
-}
-
-function isQRAvailable() {
-  return Boolean(latestQR && Date.now() - latestQR.ts < QR_EXPIRE_MS);
-}
-
-function getQRStatusPayload() {
-  return {
-    connected: isWhatsAppConnected(),
-    hasQR: isQRAvailable(),
-  };
 }
 
 function shouldStartSocket() {
@@ -117,97 +103,9 @@ function shouldStartSocket() {
   return true;
 }
 
-// QR API
-app.get('/qr', (req, res) => {
-  res.set('Cache-Control', 'no-store');
-  logInfo('QR image requested', { ip: req.ip });
-
-  if (isWhatsAppConnected()) {
-    return res.json({ status: 'connected' });
-  }
-
-  if (isQRAvailable()) {
-    return res.type('image/png').send(latestQR.png);
-  }
-
-  if (latestQR) {
-    logInfo('[WA][QR] QR expired');
-    clearLatestQR();
-  }
-
-  return res.json({ status: 'expired' });
-});
-
-app.get('/qr-status', (req, res) => {
-  res.set('Cache-Control', 'no-store');
-  res.json(getQRStatusPayload());
-});
-
-// QR Page
-app.get('/qr-page', (req, res) => {
-  res.set('Cache-Control', 'no-store');
-  logInfo('QR page requested', { ip: req.ip });
-  const html = `<!doctype html>
-  <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>WhatsApp QR - Nezuko</title>
-    <style>
-      :root{color-scheme:dark;}
-      body{background:#0b1020;color:#e6eef8;font-family:Inter,system-ui,Segoe UI,Roboto,Helvetica,Arial;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
-      .card{max-width:760px;width:100%;padding:24px;border-radius:12px;background:linear-gradient(180deg,rgba(255,255,255,0.02),rgba(255,255,255,0.01));box-shadow:0 6px 24px rgba(2,6,23,0.6);text-align:center}
-      h1{margin:0 0 8px;font-size:20px}
-      p{margin:0 0 16px;color:#9fb0d6}
-      .qr{width:320px;height:320px;margin:12px auto;background:#fff;padding:12px;border-radius:8px}
-      img.qrimg{width:100%;height:100%;object-fit:contain;display:block}
-      .small{font-size:13px;color:#8fa3cc;margin-top:8px}
-      @media(max-width:480px){.qr{width:260px;height:260px}}
-    </style>
-  </head>
-  <body>
-    <div class="card">
-      <h1 id="status">Waiting for QR...</h1>
-      <p id="sub">Open this page on your phone to scan the QR</p>
-      <div class="qr" id="qrbox"><img class="qrimg" id="qrimg" alt="QR code" style="display:none"/></div>
-      <div class="small">Auto-refreshes every 2s · Dark theme · No cache</div>
-    </div>
-    <script>
-      async function refresh() {
-        try {
-          const r = await fetch('/qr-status', { cache: 'no-store' });
-          const status = await r.json();
-
-          const image = document.getElementById('qrimg');
-          const title = document.getElementById('status');
-
-          if (status.connected) {
-            title.textContent = 'WhatsApp Connected';
-            image.style.display = 'none';
-            return;
-          }
-
-          if (status.hasQR) {
-            title.textContent = 'Scan QR with WhatsApp';
-            image.src = '/qr?ts=' + Date.now();
-            image.style.display = 'block';
-            return;
-          }
-
-          title.textContent = 'Waiting for QR...';
-          image.style.display = 'none';
-        } catch (err) {
-          console.error(err);
-        }
-      }
-
-      refresh();
-      setInterval(refresh, 2000);
-    </script>
-  </body>
-  </html>`;
-  res.type('html').send(html);
-});
+function isValidPhoneNumber(phone) {
+  return /^\d{10,15}$/.test(phone);
+}
 
 // ---------- Config ----------
 const FASTAPI_URL = process.env.FASTAPI_URL || '';
@@ -522,8 +420,8 @@ async function saveStateSafely(saveCreds) {
 function shouldReconnect(reason, lastDisconnect) {
   if (isShuttingDown) return false;
   if (connectionState === ConnectionStates.CONNECTING || connectionState === ConnectionStates.RECONNECTING) return false;
-  if (isQRAvailable()) {
-    logInfo('Reconnect skipped: waiting for QR scan');
+  if (connectionState === ConnectionStates.AWAITING_PAIRING_CODE) {
+    logInfo('Reconnect skipped: awaiting pairing code');
     return false;
   }
   if (pendingCredsSave) {
@@ -665,23 +563,8 @@ async function start() {
     isConnecting = false;
   }
 
-  // register creds.update to persist credentials
-  sock.ev.on('creds.update', async () => {
-    if (typeof saveCredsFn !== 'function') {
-      logError('[AUTH] saveCredsFn unavailable on creds.update');
-      return;
-    }
-    pendingCredsSave = true;
-    logInfo('[AUTH] Credentials update received');
-    try {
-      await saveCredsFn();
-      pendingCredsSave = false;
-      logInfo('[AUTH] Credentials saved successfully');
-    } catch (error) {
-      pendingCredsSave = false;
-      logError('[AUTH] Credentials save failed', { error: error?.message || error });
-    }
-  });
+  // register saveCreds directly so Baileys persists credentials safely
+  sock.ev.on('creds.update', saveCredsFn);
 
   // Consolidated connection.update handler with detailed logging
   sock.ev.on('connection.update', async (update) => {
@@ -696,26 +579,7 @@ async function start() {
       });
 
       if (qr) {
-        try {
-          setConnectionState(ConnectionStates.WAITING_FOR_QR);
-          const dataUrl = await qrcode.toDataURL(qr, { errorCorrectionLevel: 'M', margin: 1, scale: 6 });
-          const pngBuffer = Buffer.from(dataUrl.split(',')[1], 'base64');
-          const prev = latestQR;
-          storeLatestQR(pngBuffer);
-          logInfo('[WA][QR] New QR generated. Open:', { url: QR_PUBLIC_URL });
-          // log a small preview only (never full base64)
-          try {
-            const preview = safeSlice(pngBuffer.toString('base64'), 120);
-            logInfo('[WA][QR] QR preview (truncated)', { preview });
-          } catch (e) {
-            /* ignore preview errors */
-          }
-          if (!prev || !prev.png.equals(pngBuffer)) {
-            logInfo('[WA][QR] QR updated', { ageMs: 0 });
-          }
-        } catch (error) {
-          logError('[WA][QR] QR handling error', { error: error?.message || error });
-        }
+        logWarn('[WA][AUTH] Unexpected QR payload received while using pairing auth; ignoring QR data');
       }
 
       if (connection === 'connecting') {
@@ -731,10 +595,6 @@ async function start() {
         setConnectionState(ConnectionStates.CONNECTED);
         markActivity();
         logInfo('[WA][STATE] Connected', { isOnline, isNewLogin, receivedPendingNotifications });
-        if (latestQR) {
-          logInfo('[WA][QR] Clearing stored QR due to successful connection');
-          clearLatestQR();
-        }
         return;
       }
 
@@ -746,8 +606,7 @@ async function start() {
         logWarn('[WA][STATE] Disconnected', { statusCode, reason, lastDisconnect });
 
         if (statusCode === DisconnectReason.loggedOut || reason === 'bad_session' || reason === 'connection_replaced') {
-          logError('[WA][STATE] Permanent disconnect detected; clearing auth and QR', { statusCode, reason });
-          clearLatestQR();
+          logError('[WA][STATE] Permanent disconnect detected; clearing auth state', { statusCode, reason });
           if (statusCode === DisconnectReason.loggedOut || reason === 'bad_session') {
             try {
               await stopSocket('logout_or_bad_session');
@@ -760,11 +619,6 @@ async function start() {
 
         if (statusCode === DisconnectReason.restartRequired || reason?.includes('restart_required') || statusCode === 515) {
           logWarn('[WA][STATE] Restart required detected', { statusCode, reason });
-          // If a QR is waiting, defer any restart until QR lifecycle completes
-          if (isQRAvailable()) {
-            logInfo('Restart required but QR pending; delaying restart until after QR lifecycle');
-            return;
-          }
 
           // perform a controlled restart: stop socket, save creds, then reconnect with backoff
           try {
@@ -819,6 +673,27 @@ async function start() {
   });
 
 
+  if (!authState?.creds?.registered) {
+    try {
+      setConnectionState(ConnectionStates.AWAITING_PAIRING_CODE);
+      const pairingCode = await sock.requestPairingCode(phoneNumber);
+      console.log('==================================');
+      console.log('WHATSAPP PAIRING CODE');
+      console.log('');
+      console.log(pairingCode);
+      console.log('');
+      console.log('Open WhatsApp');
+      console.log('Linked Devices');
+      console.log('Link with Phone Number');
+      console.log('Enter the code above');
+      console.log('==================================');
+      logInfo('[AUTH] Pairing code generated');
+    } catch (error) {
+      logError('[AUTH] requestPairingCode failed', { error: error?.message || error });
+      throw error;
+    }
+  }
+
   if (!heartbeatTimer) {
     heartbeatTimer = setInterval(() => {
       const now = Date.now();
@@ -841,7 +716,7 @@ async function start() {
         if (heartbeatUnhealthyCount >= HEARTBEAT_UNHEALTHY_THRESHOLD) {
           logWarn('[WA][HEARTBEAT] Threshold reached; scheduling reconnect', { heartbeatUnhealthyCount });
           heartbeatUnhealthyCount = 0;
-          if (!isQRAvailable()) {
+          if (connectionState !== ConnectionStates.AWAITING_PAIRING_CODE) {
             reconnectSocket('heartbeat_unhealthy', null).catch((error) => logError('heartbeat reconnect failed', { error: error?.message || error }));
           }
         }
