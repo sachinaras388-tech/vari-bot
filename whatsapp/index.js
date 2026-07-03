@@ -879,6 +879,8 @@ async function start() {
       logError('messages.upsert handler error', { message: error?.message, stack: error?.stack });
     }
   }
+  })();
+  return startPromise;
 }
 
 process.on('uncaughtException', (error) => {
