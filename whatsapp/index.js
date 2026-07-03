@@ -154,9 +154,14 @@ let isShuttingDown = false;
 let lastSocketHealth = null;
 let heartbeatUnhealthyCount = 0;
 const HEARTBEAT_UNHEALTHY_THRESHOLD = Number(process.env.HEARTBEAT_UNHEALTHY_THRESHOLD || '2');
+// pairing state
+let pairingCodeRequested = false;
 // auth save handler (populated per start)
 let saveCredsFn = null;
 let pendingCredsSave = false;
+// start lock to prevent concurrent starts
+let startInProgress = false;
+let startPromise = null;
 
 // ---------- Logging helpers ----------
 function logInfo(msg, obj) {
@@ -405,8 +410,12 @@ async function ensureAuthDir() {
 
 async function saveStateSafely(saveCreds) {
   try {
-    if (typeof saveCreds === 'function') {
-      await saveCreds();
+    const fn = typeof saveCreds === 'function' ? saveCreds : saveCredsFn;
+    if (typeof fn === 'function') {
+      pendingCredsSave = true;
+      await fn();
+      pendingCredsSave = false;
+      logInfo('[AUTH] saveCreds executed successfully');
     }
     if (authState?.creds) {
       const statePath = path.join(AUTH_DIR, 'creds.json');
@@ -414,6 +423,26 @@ async function saveStateSafely(saveCreds) {
     }
   } catch (error) {
     logError('Failed to save auth state', { error: error?.message || error });
+  }
+}
+
+async function clearAuthState() {
+  try {
+    if (!fs.existsSync(AUTH_DIR)) return;
+
+    const entries = fs.readdirSync(AUTH_DIR);
+    for (const entry of entries) {
+      const entryPath = path.join(AUTH_DIR, entry);
+      if (entryPath === AUTH_DIR) continue;
+      fs.rmSync(entryPath, { recursive: true, force: true });
+    }
+
+    authState = null;
+    saveCredsFn = null;
+    pairingCodeRequested = false;
+    logInfo('[AUTH] Cleared invalid auth state from disk', { authDir: AUTH_DIR });
+  } catch (error) {
+    logError('[AUTH] Failed to clear auth state', { error: error?.message || error });
   }
 }
 
@@ -523,51 +552,70 @@ async function reconnectSocket(reason = 'unknown', lastDisconnect) {
 
 async function start() {
   if (!shouldStartSocket()) return;
-  isConnecting = true;
-  setConnectionState(ConnectionStates.CONNECTING);
 
-  logInfo('Starting Baileys socket...', { authDir: AUTH_DIR, memory: getMemoryUsage() });
-
-  try {
-    await ensureAuthDir();
-
-    const logger = pino({ level: process.env.BAILEYS_LOG_LEVEL || 'info' });
-
-    const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
-    authState = state;
-    // expose saveCreds to outer scope for use across reconnects
-    saveCredsFn = saveCreds;
-    logInfo('[AUTH] Credentials loaded', { hasCreds: Boolean(authState?.creds) });
-
-    const { version } = await fetchLatestBaileysVersion();
-
-    sock = makeWASocket({
-      logger,
-      auth: {
-        creds: state.creds,
-        keys: makeCacheableSignalKeyStore(state.keys, logger),
-      },
-      version,
-      browser: Browsers.ubuntu('Chrome'),
-      syncFullHistory: false,
-      markOnlineOnConnect: true,
-    });
-
-    isReconnecting = false;
-    lastSocketHealth = { timestamp: Date.now(), state: 'starting' };
-    markActivity();
-  } catch (error) {
-    logError('Start failed', { error: error?.message || error, stack: error?.stack });
-    throw error;
-  } finally {
-    isConnecting = false;
+  if (startInProgress) {
+    logInfo('Start already in progress; returning existing promise');
+    return startPromise;
   }
 
-  // register saveCreds directly so Baileys persists credentials safely
-  sock.ev.on('creds.update', saveCredsFn);
+  startInProgress = true;
+  startPromise = (async () => {
+    isConnecting = true;
+    setConnectionState(ConnectionStates.CONNECTING);
 
-  // Consolidated connection.update handler with detailed logging
-  sock.ev.on('connection.update', async (update) => {
+    logInfo('Starting Baileys socket...', { authDir: AUTH_DIR, memory: getMemoryUsage() });
+
+    try {
+      await ensureAuthDir();
+
+      const logger = pino({ level: process.env.BAILEYS_LOG_LEVEL || 'info' });
+
+      const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+      authState = state;
+      // expose saveCreds to outer scope for use across reconnects
+      saveCredsFn = saveCreds;
+      logInfo('[AUTH] Credentials loaded', { hasCreds: Boolean(authState?.creds), authDir: AUTH_DIR });
+
+      const { version } = await fetchLatestBaileysVersion();
+
+      sock = makeWASocket({
+        logger,
+        auth: {
+          creds: state.creds,
+          keys: makeCacheableSignalKeyStore(state.keys, logger),
+        },
+        version,
+        browser: Browsers.ubuntu('Chrome'),
+        syncFullHistory: false,
+        markOnlineOnConnect: true,
+      });
+
+      isReconnecting = false;
+      lastSocketHealth = { timestamp: Date.now(), state: 'starting' };
+      markActivity();
+
+      // register saveCreds directly so Baileys persists credentials safely
+      try {
+        if (typeof saveCredsFn === 'function') {
+          sock.ev.on('creds.update', saveCredsFn);
+          logInfo('[AUTH] Registered creds.update handler');
+        } else {
+          logWarn('[AUTH] saveCredsFn is not a function; creds.update not registered');
+        }
+      } catch (err) {
+        logWarn('[AUTH] Failed to register creds.update handler', { error: err?.message || err });
+      }
+    } catch (error) {
+      logError('Start failed', { error: error?.message || error, stack: error?.stack });
+      throw error;
+    } finally {
+      isConnecting = false;
+      startInProgress = false;
+      startPromise = null;
+    }
+
+    // Consolidated connection.update handler with detailed logging
+    sock.ev.on('connection.update', async (update) => {
     try {
       const { connection, lastDisconnect, qr, receivedPendingNotifications, isOnline, isNewLogin } = update;
 
@@ -585,6 +633,45 @@ async function start() {
       if (connection === 'connecting') {
         setConnectionState(ConnectionStates.CONNECTING);
         logInfo('[WA][STATE] Connecting');
+
+        // Only request pairing code when socket is ready and we truly have no usable credentials.
+        try {
+          const hasCredFiles = fs.existsSync(path.join(AUTH_DIR, 'creds.json')) || (authState && Object.keys(authState.creds || {}).length > 0);
+          if (hasCredFiles) {
+            logInfo('[AUTH] Existing credentials found; skipping pairing code request', { authDir: AUTH_DIR });
+          } else if (pairingCodeRequested) {
+            logInfo('[AUTH] Pairing code already requested; skipping duplicate');
+          } else if (!sock || typeof sock.requestPairingCode !== 'function') {
+            logWarn('[AUTH] requestPairingCode unavailable on socket yet; will wait for a later update');
+          } else if (typeof saveCredsFn !== 'function') {
+            logWarn('[AUTH] saveCreds unavailable; not requesting pairing code to avoid loss of creds');
+          } else {
+            // mark requested only when we are about to perform the call to avoid races
+            logInfo('[AUTH] Requesting pairing code (safe-guarded)');
+            pairingCodeRequested = true;
+            // slight delay to ensure socket internals are ready
+            await new Promise((r) => setTimeout(r, 250));
+            try {
+              const pairingCode = await sock.requestPairingCode(phoneNumber);
+              console.log('==================================');
+              console.log('WHATSAPP PAIRING CODE');
+              console.log('');
+              console.log(pairingCode);
+              console.log('');
+              console.log('Open WhatsApp');
+              console.log('Linked Devices');
+              console.log('Link with Phone Number');
+              console.log('Enter the code above');
+              console.log('==================================');
+              logInfo('[AUTH] Pairing code generated', { pairingCode: safeSlice(pairingCode, 200) });
+            } catch (error) {
+              pairingCodeRequested = false;
+              logError('[AUTH] requestPairingCode failed', { error: error?.message || error });
+            }
+          }
+        } catch (err) {
+          logWarn('[AUTH] Error while deciding to request pairing code', { error: err?.message || err });
+        }
       }
 
       if (connection === 'open') {
@@ -605,15 +692,21 @@ async function start() {
         setConnectionState(ConnectionStates.DISCONNECTED);
         logWarn('[WA][STATE] Disconnected', { statusCode, reason, lastDisconnect });
 
-        if (statusCode === DisconnectReason.loggedOut || reason === 'bad_session' || reason === 'connection_replaced') {
-          logError('[WA][STATE] Permanent disconnect detected; clearing auth state', { statusCode, reason });
-          if (statusCode === DisconnectReason.loggedOut || reason === 'bad_session') {
-            try {
-              await stopSocket('logout_or_bad_session');
-            } catch (error) {
-              logError('Error during permanent disconnect cleanup', { error: error?.message || error });
-            }
+        if (statusCode === DisconnectReason.loggedOut || statusCode === 401 || reason?.toLowerCase().includes('logged out') || reason?.toLowerCase().includes('401')) {
+          logError('[WA][STATE] Invalid or logged out credentials detected; clearing auth state', { statusCode, reason });
+          try {
+            await clearAuthState();
+          } catch (error) {
+            logError('[AUTH] clearAuthState failed', { error: error?.message || error });
           }
+
+          try {
+            await stopSocket('invalid_credentials');
+          } catch (error) {
+            logWarn('Error stopping socket after invalid credentials', { error: error?.message || error });
+          }
+
+          reconnectSocket('invalid_credentials', lastDisconnect);
           return;
         }
 
@@ -672,27 +765,6 @@ async function start() {
     reconnectSocket('stream_error', null).catch((error) => logError('stream.error reconnect failed', { error: error?.message || error }));
   });
 
-
-  if (!authState?.creds?.registered) {
-    try {
-      setConnectionState(ConnectionStates.AWAITING_PAIRING_CODE);
-      const pairingCode = await sock.requestPairingCode(phoneNumber);
-      console.log('==================================');
-      console.log('WHATSAPP PAIRING CODE');
-      console.log('');
-      console.log(pairingCode);
-      console.log('');
-      console.log('Open WhatsApp');
-      console.log('Linked Devices');
-      console.log('Link with Phone Number');
-      console.log('Enter the code above');
-      console.log('==================================');
-      logInfo('[AUTH] Pairing code generated');
-    } catch (error) {
-      logError('[AUTH] requestPairingCode failed', { error: error?.message || error });
-      throw error;
-    }
-  }
 
   if (!heartbeatTimer) {
     heartbeatTimer = setInterval(() => {
