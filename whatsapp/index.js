@@ -57,11 +57,11 @@ function setConnectionState(nextState) {
 }
 
 function isSocketOpen() {
-  return Boolean(socket && socket.ws && socket.ws.readyState === 1);
+  return Boolean(sock && sock.ws && sock.ws.readyState === 1);
 }
 
 function isSocketPresent() {
-  return Boolean(socket);
+  return Boolean(sock);
 }
 
 function markActivity() {
@@ -246,7 +246,7 @@ const fastApiHttpClient = axios.create({
   headers: { 'Content-Type': 'application/json' },
 });
 
-let socket = null;
+let sock = null;
 let authState = null;
 let reconnectTimer = null;
 let heartbeatTimer = null;
@@ -542,26 +542,26 @@ async function stopSocket(reason = 'shutdown') {
   clearReconnectTimer();
   clearHeartbeatTimer();
 
-  if (socket) {
+  if (sock) {
     try {
-      logWarn('Stopping existing socket', { reason, id: socket?.user?.id, state: lastSocketHealth });
+      logWarn('Stopping existing socket', { reason, id: sock?.user?.id, state: lastSocketHealth });
       try {
-        socket.ev.removeAllListeners?.();
+        sock.ev.removeAllListeners?.();
       } catch (err) {
         logWarn('Failed to remove event listeners cleanly', { error: err?.message || err });
       }
 
       try {
         // prefer graceful close; if not available, terminate
-        if (socket.ws && typeof socket.ws.close === 'function') await socket.ws.close();
-        else if (socket.ws && typeof socket.ws.terminate === 'function') socket.ws.terminate();
+        if (sock.ws && typeof sock.ws.close === 'function') await sock.ws.close();
+        else if (sock.ws && typeof sock.ws.terminate === 'function') sock.ws.terminate();
       } catch (err) {
         logWarn('Socket close warning', { error: err?.message || err });
       }
     } catch (error) {
       logWarn('Socket stop outer warning', { error: error?.message || error });
     }
-    socket = null;
+    sock = null;
   }
 }
 
@@ -633,7 +633,7 @@ async function start() {
 
     const { version } = await fetchLatestBaileysVersion();
 
-    const sock = makeWASocket({
+    sock = makeWASocket({
       logger,
       auth: {
         creds: state.creds,
@@ -645,7 +645,6 @@ async function start() {
       markOnlineOnConnect: true,
     });
 
-    socket = sock;
     isReconnecting = false;
     lastSocketHealth = { timestamp: Date.now(), state: 'starting' };
     markActivity();
@@ -673,8 +672,8 @@ async function start() {
       logInfo('[WA][EVENT] connection.update', {
         connection,
         lastDisconnect: lastDisconnect ? { message: lastDisconnect?.error?.message, output: lastDisconnect?.error?.output } : null,
-        wsReadyState: socket?.ws?.readyState,
-        userId: socket?.user?.id,
+        wsReadyState: sock?.ws?.readyState,
+        userId: sock?.user?.id,
       });
 
       if (qr) {
@@ -761,7 +760,7 @@ async function start() {
   });
 
   sock.ev.on('ws.close', () => {
-    logWarn('[WA][STATE] WebSocket closed', { wsReadyState: socket?.ws?.readyState });
+    logWarn('[WA][STATE] WebSocket closed', { wsReadyState: sock?.ws?.readyState });
     reconnectSocket('websocket_closed', null).catch((error) => logError('ws.close reconnect failed', { error: error?.message || error }));
   });
 
@@ -779,8 +778,8 @@ async function start() {
   if (!heartbeatTimer) {
     heartbeatTimer = setInterval(() => {
       const now = Date.now();
-      const wsReady = socket?.ws?.readyState;
-      const healthy = Boolean(socket && wsReady === 1);
+      const wsReady = sock?.ws?.readyState;
+      const healthy = Boolean(sock && wsReady === 1);
       const idleMs = now - lastActivityAt;
 
       if (!healthy || idleMs > HEARTBEAT_INTERVAL_MS * 2) {
