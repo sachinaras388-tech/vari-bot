@@ -256,6 +256,9 @@ let isShuttingDown = false;
 let lastSocketHealth = null;
 let heartbeatUnhealthyCount = 0;
 const HEARTBEAT_UNHEALTHY_THRESHOLD = Number(process.env.HEARTBEAT_UNHEALTHY_THRESHOLD || '2');
+// auth save handler (populated per start)
+let saveCredsFn = null;
+let pendingCredsSave = false;
 
 // ---------- Logging helpers ----------
 function logInfo(msg, obj) {
@@ -523,6 +526,10 @@ function shouldReconnect(reason, lastDisconnect) {
     logInfo('Reconnect skipped: waiting for QR scan');
     return false;
   }
+  if (pendingCredsSave) {
+    logInfo('Reconnect skipped: pending credentials save');
+    return false;
+  }
   if (reason === 'logout') return false;
   if (lastDisconnect?.error?.output?.statusCode === DisconnectReason.loggedOut) return false;
   if (reason === 'bad_session') return false;
@@ -630,6 +637,9 @@ async function start() {
 
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
     authState = state;
+    // expose saveCreds to outer scope for use across reconnects
+    saveCredsFn = saveCreds;
+    logInfo('[AUTH] Credentials loaded', { hasCreds: Boolean(authState?.creds) });
 
     const { version } = await fetchLatestBaileysVersion();
 
@@ -655,12 +665,21 @@ async function start() {
     isConnecting = false;
   }
 
+  // register creds.update to persist credentials
   sock.ev.on('creds.update', async () => {
+    if (typeof saveCredsFn !== 'function') {
+      logError('[AUTH] saveCredsFn unavailable on creds.update');
+      return;
+    }
+    pendingCredsSave = true;
+    logInfo('[AUTH] Credentials update received');
     try {
-      await saveCreds();
-      logInfo('[WA][AUTH] Credentials saved');
+      await saveCredsFn();
+      pendingCredsSave = false;
+      logInfo('[AUTH] Credentials saved successfully');
     } catch (error) {
-      logError('[WA][AUTH] Credentials save failed', { error: error?.message || error });
+      pendingCredsSave = false;
+      logError('[AUTH] Credentials save failed', { error: error?.message || error });
     }
   });
 
@@ -750,7 +769,7 @@ async function start() {
           // perform a controlled restart: stop socket, save creds, then reconnect with backoff
           try {
             logInfo('[WA][STATE] Performing controlled restart due to server request', { statusCode });
-            await saveStateSafely(() => authState?.saveCreds && authState.saveCreds());
+            await saveStateSafely(saveCredsFn);
           } catch (e) {
             logWarn('Failed to save creds before restart', { error: e?.message || e });
           }
