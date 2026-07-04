@@ -18,6 +18,7 @@ class WhatsAppClient {
     this.fastApi = new FastApiClient();
     this.connected = false;
     this.configReady = false;
+    this.connectionStatus = 'stopped';
     this.reconnectAttempts = 0;
     this.reconnectTimer = null;
     this.healthCheckTimer = null;
@@ -34,6 +35,7 @@ class WhatsAppClient {
     if (missing.length) {
       logger.warn({ missing }, 'WhatsApp Cloud API config is incomplete; outbound replies will be unavailable until configured');
       this.configReady = false;
+      this.connectionStatus = 'config_incomplete';
       return false;
     }
 
@@ -44,8 +46,16 @@ class WhatsAppClient {
   start() {
     this.validateConfig();
     this.connected = true;
+    this.connectionStatus = this.configReady ? 'ready' : 'ready_with_warnings';
     this.lastActivityAt = Date.now();
-    logger.info({ phoneNumber: this.phoneNumber, configured: this.configReady }, 'WhatsApp webhook client initialized');
+    logger.info(
+      {
+        phoneNumber: this.phoneNumber,
+        configured: this.configReady,
+        connectionStatus: this.connectionStatus,
+      },
+      'WhatsApp webhook client initialized'
+    );
     this.startHealthCheck();
     return Promise.resolve();
   }
@@ -54,24 +64,32 @@ class WhatsAppClient {
     this.clearReconnectTimer();
     this.clearHealthCheck();
     this.connected = false;
+    this.connectionStatus = 'stopped';
     logger.info('WhatsApp webhook client stopped');
   }
 
   async handleIncomingWebhook(payload) {
     this.markActivity();
+    logger.info({ payloadReceived: Boolean(payload) }, 'Received WhatsApp webhook payload');
+
     const normalized = this.normalizePayload(payload);
     if (!normalized) {
+      logger.warn('Ignoring incoming WhatsApp webhook because the payload was invalid');
       return { status: 'ignored', reason: 'invalid_payload' };
     }
 
     const messageBody = normalized.message || '';
     const shouldProcess = /nezuko/i.test(messageBody) || normalized.quoted_text?.match(/nezuko/i);
     if (!shouldProcess) {
+      logger.info({ from: normalized.phone_number }, 'Ignoring WhatsApp message because it did not trigger the bot');
       return { status: 'ignored', reason: 'no_trigger' };
     }
 
+    logger.info({ from: normalized.phone_number, isGroup: normalized.is_group }, 'Processing WhatsApp message');
+
     const cacheKey = `${normalized.platform_id}:${normalized.message}:${normalized.is_group}`;
     if (this.messageCache.has(cacheKey)) {
+      logger.info({ from: normalized.phone_number }, 'Ignored duplicate WhatsApp message');
       return { status: 'ignored', reason: 'duplicate_message' };
     }
     this.messageCache.set(cacheKey, true);
@@ -80,9 +98,11 @@ class WhatsAppClient {
     const apiResult = await this.fastApi.forward(normalized);
     if (!apiResult || apiResult.status !== 'success') {
       const fallback = apiResult?.reply || this.fastApi.fallbackReply;
+      logger.error({ from: normalized.phone_number, reason: 'fastapi_unavailable' }, 'FastAPI bot response failed');
       return { status: 'error', reason: 'fastapi_unavailable', reply: fallback };
     }
 
+    logger.info({ from: normalized.phone_number }, 'WhatsApp message processed successfully');
     return { status: 'success', reply: apiResult.reply || '' };
   }
 
@@ -155,11 +175,17 @@ class WhatsAppClient {
       text: { body: text },
     };
 
-    await this.httpClient.post(url, body, {
-      headers: {
-        Authorization: `Bearer ${this.accessToken}`,
-      },
-    });
+    try {
+      await this.httpClient.post(url, body, {
+        headers: {
+          Authorization: `Bearer ${this.accessToken}`,
+        },
+      });
+      logger.info({ to, messageLength: text.length }, 'WhatsApp outbound message sent successfully');
+    } catch (error) {
+      logger.error({ to, err: error?.message || error }, 'Failed to send WhatsApp outbound message');
+      throw error;
+    }
   }
 
   async sendTemplate(to, templateName, languageCode = 'en_US') {
@@ -174,11 +200,17 @@ class WhatsAppClient {
       },
     };
 
-    await this.httpClient.post(url, body, {
-      headers: {
-        Authorization: `Bearer ${this.accessToken}`,
-      },
-    });
+    try {
+      await this.httpClient.post(url, body, {
+        headers: {
+          Authorization: `Bearer ${this.accessToken}`,
+        },
+      });
+      logger.info({ to, templateName }, 'WhatsApp template message sent successfully');
+    } catch (error) {
+      logger.error({ to, templateName, err: error?.message || error }, 'Failed to send WhatsApp template message');
+      throw error;
+    }
   }
 
   markActivity() {
