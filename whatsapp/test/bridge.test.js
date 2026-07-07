@@ -9,6 +9,7 @@ const {
   getBackoffDelay,
 } = require('../src/bridge-utils');
 const FastApiClient = require('../src/fastapi');
+const WhatsAppWebClient = require('../src/whatsapp-web-client');
 
 test('normalizeMessagePayload maps a web.js message into the bridge contract', () => {
   const message = {
@@ -91,4 +92,13 @@ test('FastApiClient returns the fallback reply after repeated timeouts', async (
 
   assert.equal(result.status, 'error');
   assert.equal(result.reply, client.fallbackReply);
+});
+
+test('Puppeteer config avoids unsupported single-process flag', () => {
+  const client = new WhatsAppWebClient();
+  const config = client.getPuppeteerConfig();
+
+  assert.equal(config.headless, true);
+  assert.ok(config.args.includes('--no-sandbox'));
+  assert.equal(config.args.includes('--single-process'), false);
 });
