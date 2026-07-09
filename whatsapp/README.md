@@ -1,12 +1,12 @@
-# WhatsApp webhook service
+# WhatsApp bridge service
 
-This service replaces the old Baileys-based socket client with a stable webhook-based integration for WhatsApp Cloud API.
+This service now operates as a resilient WhatsApp gateway that queues inbound messages, deduplicates them, retries FastAPI requests, and exposes health endpoints for production monitoring.
 
 ## What changed
-- Removed Baileys, pairing-code, QR, auth-state, reconnect, and heartbeat logic.
-- Kept the FastAPI webhook bridge intact so existing chatbot routing continues to work.
-- Added modular files under src/ for configuration, logging, FastAPI forwarding, and the WhatsApp client.
-- Added automatic recovery behavior for transient disconnects and idle conditions.
+- Replaced the brittle webhook-only client with a production-oriented bridge that keeps the existing API contract intact.
+- Added message deduplication, queueing, retry/backoff logic, and graceful recovery for transient failures.
+- Added health endpoints at /health and /readyz for Render and monitoring integrations.
+- Added structured logging and safer shutdown handling so the process does not crash on unhandled rejections or uncaught exceptions.
 
 ## Required environment variables
 - PORT
@@ -15,11 +15,16 @@ This service replaces the old Baileys-based socket client with a stable webhook-
 - WHATSAPP_PHONE_NUMBER
 - WHATSAPP_ACCESS_TOKEN
 - WHATSAPP_BUSINESS_ACCOUNT_ID
+- WHATSAPP_VERIFY_TOKEN
 - WHATSAPP_API_VERSION (optional)
 - WHATSAPP_RECOVERY_ENABLED (optional)
+- WHATSAPP_BROWSER_RECOVERY_ENABLED (optional)
+- FASTAPI_TIMEOUT_MS (optional)
+- FASTAPI_MAX_RETRIES (optional)
 - LOG_LEVEL (optional)
 
 ## Render deployment notes
-- Keep the service running on Render as a web process.
-- Set the webhook URL to: https://<your-render-host>/webhook/whatsapp
-- Make sure the Meta app verifies the webhook and sends messages to this endpoint.
+- Run this service as a web process on Render.
+- Set the Meta webhook URL to https://<your-render-host>/webhook/whatsapp.
+- Keep the service alive with auto-restart enabled and health checks pointed at /health.
+- Avoid relying on local browser binaries; the bridge is designed to recover without hardcoded Chrome paths.
