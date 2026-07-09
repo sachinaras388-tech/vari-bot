@@ -6,6 +6,7 @@ const FastApiClient = require('./fastapi');
 class WhatsAppClient {
   constructor() {
     this.phoneNumber = getEnv('WHATSAPP_PHONE_NUMBER', '');
+    this.phoneNumberId = getEnv('WHATSAPP_PHONE_NUMBER_ID', '');
     this.accessToken = getEnv('WHATSAPP_ACCESS_TOKEN', '');
     this.businessAccountId = getEnv('WHATSAPP_BUSINESS_ACCOUNT_ID', '');
     this.verifyToken = getEnv('WHATSAPP_VERIFY_TOKEN', '');
@@ -29,8 +30,8 @@ class WhatsAppClient {
   validateConfig() {
     const missing = [];
     if (!this.phoneNumber) missing.push('WHATSAPP_PHONE_NUMBER');
+    if (!this.phoneNumberId) missing.push('WHATSAPP_PHONE_NUMBER_ID');
     if (!this.accessToken) missing.push('WHATSAPP_ACCESS_TOKEN');
-    if (!this.businessAccountId) missing.push('WHATSAPP_BUSINESS_ACCOUNT_ID');
 
     if (missing.length) {
       logger.warn({ missing }, 'WhatsApp Cloud API config is incomplete; outbound replies will be unavailable until configured');
@@ -167,7 +168,11 @@ class WhatsAppClient {
       throw new Error('WhatsApp Cloud API is not configured');
     }
 
-    const url = `${this.baseUrl}/${this.businessAccountId}/messages`;
+    if (!this.phoneNumberId) {
+      throw new Error('WHATSAPP_PHONE_NUMBER_ID is not configured');
+    }
+
+    const url = `${this.baseUrl}/${this.phoneNumberId}/messages`;
     const body = {
       messaging_product: 'whatsapp',
       to,
@@ -189,7 +194,11 @@ class WhatsAppClient {
   }
 
   async sendTemplate(to, templateName, languageCode = 'en_US') {
-    const url = `${this.baseUrl}/${this.businessAccountId}/messages`;
+    if (!this.phoneNumberId) {
+      throw new Error('WHATSAPP_PHONE_NUMBER_ID is not configured');
+    }
+
+    const url = `${this.baseUrl}/${this.phoneNumberId}/messages`;
     const body = {
       messaging_product: 'whatsapp',
       to,
