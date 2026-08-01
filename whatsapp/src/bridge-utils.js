@@ -124,12 +124,14 @@ function createMessageDeduper(ttlMs = DEFAULT_TTL_MS, maxEntries = DEFAULT_MAX_E
   };
 }
 
-function shouldProcessMessage(message) {
+function shouldProcessMessage(message, options = {}) {
   if (!message) {
     return false;
   }
 
-  if (message.fromMe || message.isStatus || message.isBroadcast) {
+  const allowSelfMessages = Boolean(options.allowSelfMessages);
+
+  if (!allowSelfMessages && (message.fromMe || message.isStatus || message.isBroadcast || message.isOwnMessage)) {
     return false;
   }
 
@@ -137,7 +139,45 @@ function shouldProcessMessage(message) {
     return false;
   }
 
-  return Boolean(message.body || message.text || message.hasMedia || message.type !== 'chat');
+  const body = String(message.body || message.text || message.message || '').trim();
+  return Boolean(body || message.hasMedia || message.type !== 'chat');
+}
+
+function createMessageLoopGuard(ttlMs = 15_000) {
+  const recentInbound = new Map();
+  const recentOutbound = new Map();
+
+  return {
+    shouldProcess(messageText, chatId, phoneNumber) {
+      const now = Date.now();
+      const normalizedText = String(messageText || '').trim().toLowerCase();
+      const fingerprint = `${chatId || ''}:${phoneNumber || ''}:${normalizedText}`;
+
+      const outbound = recentOutbound.get(chatId || '');
+      if (outbound && outbound.text === normalizedText && now - outbound.timestamp < ttlMs) {
+        return false;
+      }
+
+      const inboundTs = recentInbound.get(fingerprint);
+      if (inboundTs && now - inboundTs < ttlMs) {
+        return false;
+      }
+
+      recentInbound.set(fingerprint, now);
+      return true;
+    },
+    markOutbound(chatId, messageText) {
+      const normalizedText = String(messageText || '').trim().toLowerCase();
+      if (!chatId || !normalizedText) {
+        return;
+      }
+      recentOutbound.set(chatId, { text: normalizedText, timestamp: Date.now() });
+    },
+    clear() {
+      recentInbound.clear();
+      recentOutbound.clear();
+    },
+  };
 }
 
 function isTransientFailure(error) {
@@ -169,6 +209,7 @@ module.exports = {
   normalizeMessagePayload,
   normalizeWebhookPayload,
   createMessageDeduper,
+  createMessageLoopGuard,
   shouldProcessMessage,
   isTransientFailure,
   getBackoffDelay,

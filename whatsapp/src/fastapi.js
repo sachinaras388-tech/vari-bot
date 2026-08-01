@@ -8,8 +8,8 @@ class FastApiClient {
     this.baseUrl = getEnv('FASTAPI_URL', '').replace(/\/$/, '');
     this.endpoint = this.baseUrl ? `${this.baseUrl}/api/v1/whatsapp/message` : '';
     this.timeoutMs = getIntEnv('FASTAPI_TIMEOUT_MS', 8000);
-    this.maxRetries = getIntEnv('FASTAPI_MAX_RETRIES', 3);
-    this.retryDelayMs = getIntEnv('FASTAPI_RETRY_DELAY_MS', 250);
+    this.maxRetries = Math.max(0, getIntEnv('FASTAPI_MAX_RETRIES', 1));
+    this.retryDelayMs = getIntEnv('FASTAPI_RETRY_DELAY_MS', 100);
     this.fallbackReply = getEnv('FASTAPI_FALLBACK_REPLY', 'Sorry! My brain is taking time. Try again in a bit 😭');
     this.client = axios.create({
       timeout: this.timeoutMs,

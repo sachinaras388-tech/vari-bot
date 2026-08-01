@@ -1,6 +1,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
+process.env.WHATSAPP_CLIENT_MODE = 'bridge';
+process.env.USE_QR = 'false';
+process.env.USE_PAIRING_CODE = 'false';
+
 const WhatsAppClient = require('../src/whatsapp-client');
 
 test('sendText uses the phone number ID for the WhatsApp Cloud API endpoint', async () => {
@@ -10,6 +14,7 @@ test('sendText uses the phone number ID for the WhatsApp Cloud API endpoint', as
   process.env.WHATSAPP_BUSINESS_ACCOUNT_ID = 'business-account-id-456';
 
   const client = new WhatsAppClient();
+  client.ready = true;
   client.connected = true;
   client.configReady = true;
 

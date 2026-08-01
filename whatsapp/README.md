@@ -1,11 +1,11 @@
 # WhatsApp bridge service
 
-This service now operates as a resilient WhatsApp gateway that queues inbound messages, deduplicates them, retries FastAPI requests, and exposes health endpoints for production monitoring.
+This service now operates as a WhatsApp Cloud API bridge that normalizes incoming payloads, forwards messages to a FastAPI backend, and exposes health endpoints for monitoring.
 
 ## What changed
-- Replaced the brittle webhook-only client with a production-oriented bridge that keeps the existing API contract intact.
+- Replaced the legacy browser-based client with a cloud API bridge implementation.
 - Added message deduplication, queueing, retry/backoff logic, and graceful recovery for transient failures.
-- Added health endpoints at /health and /readyz for Render and monitoring integrations.
+- Added health endpoints at /health and /readyz for monitoring.
 - Added structured logging and safer shutdown handling so the process does not crash on unhandled rejections or uncaught exceptions.
 
 ## Required environment variables
@@ -22,9 +22,15 @@ This service now operates as a resilient WhatsApp gateway that queues inbound me
 - FASTAPI_TIMEOUT_MS (optional)
 - FASTAPI_MAX_RETRIES (optional)
 - LOG_LEVEL (optional)
+- WHATSAPP_SESSION_PATH (optional)
+- WHATSAPP_MAX_RECONNECT_ATTEMPTS (optional)
+
+## Nezuko notes
+- The bridge honors wake-word messages and forwards them to the backend for AI reply generation.
+- QR code data is available from /qr, /qr.png, and /qr.svg when session-based auth is in use.
+- Reconnect loops are guarded to avoid duplicate recovery attempts.
 
 ## Render deployment notes
 - Run this service as a web process on Render.
 - Set the Meta webhook URL to https://<your-render-host>/webhook/whatsapp.
 - Keep the service alive with auto-restart enabled and health checks pointed at /health.
-- Avoid relying on local browser binaries; the bridge is designed to recover without hardcoded Chrome paths.

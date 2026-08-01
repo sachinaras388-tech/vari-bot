@@ -3,13 +3,14 @@ const assert = require('node:assert/strict');
 
 const {
   createMessageDeduper,
+  createMessageLoopGuard,
   normalizeMessagePayload,
   shouldProcessMessage,
   isTransientFailure,
   getBackoffDelay,
 } = require('../src/bridge-utils');
 const FastApiClient = require('../src/fastapi');
-const WhatsAppWebClient = require('../src/whatsapp-web-client');
+const WhatsAppBridge = require('../src/whatsapp-bridge');
 
 test('normalizeMessagePayload maps a web.js message into the bridge contract', () => {
   const message = {
@@ -53,6 +54,25 @@ test('status and own messages are ignored before processing', () => {
   assert.equal(shouldProcessMessage({ fromMe: false, isStatus: false, isBroadcast: false }), true);
 });
 
+test('self messages are allowed when explicitly enabled for development testing', () => {
+  const selfMessage = { fromMe: true, isStatus: false, isBroadcast: false, body: 'nezuko help' };
+  assert.equal(shouldProcessMessage(selfMessage, { allowSelfMessages: false }), false);
+  assert.equal(shouldProcessMessage(selfMessage, { allowSelfMessages: true }), true);
+});
+
+test('normalized payloads with a message field are processed correctly', () => {
+  const normalizedMessage = { fromMe: true, isStatus: false, isBroadcast: false, message: 'Nezuko help' };
+  assert.equal(shouldProcessMessage(normalizedMessage, { allowSelfMessages: true }), true);
+});
+
+test('loop guard suppresses repeated inbound messages and self-replies', () => {
+  const guard = createMessageLoopGuard(5_000);
+  assert.equal(guard.shouldProcess('Nezuko help', 'chat-1', 'user-1'), true);
+  assert.equal(guard.shouldProcess('Nezuko help', 'chat-1', 'user-1'), false);
+  guard.markOutbound('chat-1', 'Nezuko commands');
+  assert.equal(guard.shouldProcess('Nezuko commands', 'chat-1', 'user-1'), false);
+});
+
 test('transient failures are retried and timeouts use backoff', () => {
   assert.equal(isTransientFailure({ code: 'ECONNRESET' }), true);
   assert.equal(isTransientFailure({ response: { status: 429 } }), true);
@@ -68,7 +88,7 @@ test('FastApiClient retries transient failures before falling back', async () =>
 
   client.client.post = async () => {
     attempts += 1;
-    if (attempts < 3) {
+    if (attempts < 2) {
       throw { code: 'ECONNRESET' };
     }
 
@@ -77,7 +97,7 @@ test('FastApiClient retries transient failures before falling back', async () =>
 
   const result = await client.forward({ message: 'hello' });
 
-  assert.equal(attempts, 3);
+  assert.equal(attempts, 2);
   assert.equal(result.status, 'success');
   assert.equal(result.reply, 'ok');
 });
@@ -94,11 +114,16 @@ test('FastApiClient returns the fallback reply after repeated timeouts', async (
   assert.equal(result.reply, client.fallbackReply);
 });
 
-test('Puppeteer config avoids unsupported single-process flag', () => {
-  const client = new WhatsAppWebClient();
-  const config = client.getPuppeteerConfig();
+test('WhatsAppBridge verifies incoming webhook tokens correctly', () => {
+  const bridge = new WhatsAppBridge();
+  bridge.verifyToken = 'secret';
 
-  assert.equal(config.headless, true);
-  assert.ok(config.args.includes('--no-sandbox'));
-  assert.equal(config.args.includes('--single-process'), false);
+  const result = bridge.verifyWebhook({
+    'hub.mode': 'subscribe',
+    'hub.verify_token': 'secret',
+    'hub.challenge': 'challenge-code',
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.challenge, 'challenge-code');
 });

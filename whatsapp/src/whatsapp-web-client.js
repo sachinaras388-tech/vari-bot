@@ -19,10 +19,12 @@ class WhatsAppWebClient {
     this.startPromise = null;
     this.lastStartupError = null;
     this.lockDiagnostics = null;
-    this.browserProfileDir = null;
     this.activeClientId = 'wbot';
     this.sessionPath = path.resolve(getEnv('WHATSAPP_SESSION_PATH', './.wwebjs-auth'));
     this.headless = getBoolEnv('WHATSAPP_HEADLESS', true);
+    this.reconnectInProgress = false;
+    this.shutdownRequested = false;
+    this.reconnectDelayMs = getIntEnv('WHATSAPP_RECONNECT_DELAY_MS', 5000);
     this.puppeteerArgs = [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -40,7 +42,60 @@ class WhatsAppWebClient {
 
   getExecutablePath() {
     const configuredPath = getEnv('PUPPETEER_EXECUTABLE_PATH', '').trim();
-    return configuredPath || undefined;
+    const candidatePaths = [];
+
+    if (configuredPath) {
+      candidatePaths.push(configuredPath);
+    }
+
+    const fallbackEnvPath = getEnv('PUPPETEER_BROWSER_PATH', '').trim();
+    if (fallbackEnvPath && fallbackEnvPath !== configuredPath) {
+      candidatePaths.push(fallbackEnvPath);
+    }
+
+    if (process.platform === 'win32') {
+      candidatePaths.push(
+        path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Google\\Chrome\\Application\\chrome.exe'),
+        path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Google\\Chrome\\Application\\chrome.exe'),
+        path.join(process.env.LOCALAPPDATA || path.join(process.env.USERPROFILE || '', 'AppData\\Local'), 'Google\\Chrome\\Application\\chrome.exe'),
+        path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Microsoft\\Edge\\Application\\msedge.exe'),
+        path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Microsoft\\Edge\\Application\\msedge.exe'),
+      );
+    } else if (process.platform === 'linux') {
+      candidatePaths.push(
+        '/usr/bin/google-chrome-stable',
+        '/usr/bin/google-chrome',
+        '/usr/bin/chromium-browser',
+        '/usr/bin/chromium',
+        '/snap/bin/chromium',
+      );
+    } else if (process.platform === 'darwin') {
+      candidatePaths.push(
+        '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+        '/Applications/Chromium.app/Contents/MacOS/Chromium',
+      );
+    }
+
+    for (const candidate of candidatePaths) {
+      if (candidate && fs.existsSync(candidate)) {
+        if (candidate !== configuredPath) {
+          logger.info({ configuredPath, candidate }, 'Using detected browser executable for Puppeteer');
+        }
+        return candidate;
+      }
+    }
+
+    if (!configuredPath) {
+      return undefined;
+    }
+
+    logger.warn(
+      { configuredPath },
+      'Configured Puppeteer executable path does not exist; clearing the env override and falling back to the default browser executable',
+    );
+    delete process.env.PUPPETEER_EXECUTABLE_PATH;
+    delete process.env.PUPPETEER_BROWSER_PATH;
+    return undefined;
   }
 
   getClientId() {
@@ -52,25 +107,11 @@ class WhatsAppWebClient {
   }
 
   getBrowserProfileDir() {
-    const configuredPath = getEnv('WHATSAPP_BROWSER_PROFILE_DIR', '').trim();
-    if (configuredPath) {
-      return path.resolve(configuredPath);
-    }
+  return path.join(this.sessionPath, `puppeteer-profile-${this.activeClientId}`);
+}
 
-    return path.join(this.sessionPath, 'puppeteer-profile-wbot');
-  }
-
-  ensureBrowserProfileDir() {
-    const browserProfileDir = this.getBrowserProfileDir();
-    fs.mkdirSync(browserProfileDir, { recursive: true });
-    this.browserProfileDir = browserProfileDir;
-    return browserProfileDir;
-  }
-
-  getPuppeteerConfig(browserWSEndpoint = '') {
+  getPuppeteerConfig() {
     const args = [...this.puppeteerArgs];
-    const browserProfileDir = this.ensureBrowserProfileDir();
-    args.push(`--user-data-dir=${browserProfileDir}`);
 
     if (process.platform === 'linux') {
       args.push('--disable-features=IsolateOrigins,site-per-process');
@@ -79,12 +120,12 @@ class WhatsAppWebClient {
     const config = {
       headless: this.headless,
       args,
-      executablePath: this.getExecutablePath(),
       timeout: getIntEnv('PUPPETEER_TIMEOUT_MS', 120000),
     };
 
-    if (browserWSEndpoint) {
-      config.browserWSEndpoint = browserWSEndpoint;
+    const executablePath = this.getExecutablePath();
+    if (executablePath) {
+      config.executablePath = executablePath;
     }
 
     return config;
@@ -210,7 +251,7 @@ class WhatsAppWebClient {
   }
 
   async start() {
-    if (this.client) {
+    if (this.client && this.ready) {
       return this.client;
     }
 
@@ -231,26 +272,43 @@ class WhatsAppWebClient {
     this.activeClientId = this.getClientId();
     this.lockDiagnostics = null;
     const authSessionDir = this.getSessionFolder();
-    const browserProfileDir = this.ensureBrowserProfileDir();
 
     logger.info(
       {
         clientId: this.activeClientId,
         sessionPath: this.sessionPath,
         authSessionDir,
-        browserProfileDir,
         headless: this.headless,
       },
       'Starting WhatsApp Web client',
     );
 
     const lockDiagnostics = this.inspectProfileLock({ message: 'startup-check' });
-    const browserWSEndpoint = lockDiagnostics.browserWSEndpoint || getEnv('WHATSAPP_BROWSER_WS_ENDPOINT', '').trim();
+    const browserWSEndpoint = getEnv('WHATSAPP_BROWSER_WS_ENDPOINT', '').trim();
     this.lockDiagnostics = lockDiagnostics;
+    this.shutdownRequested = false;
+
+    const puppeteerConfig = this.getPuppeteerConfig();
+    if (browserWSEndpoint) {
+      puppeteerConfig.browserWSEndpoint = browserWSEndpoint;
+    }
+
+    logger.info(
+      {
+        puppeteerConfig: {
+          headless: puppeteerConfig.headless,
+          executablePath: puppeteerConfig.executablePath || 'default',
+          args: puppeteerConfig.args,
+          timeout: puppeteerConfig.timeout,
+          browserWSEndpoint: puppeteerConfig.browserWSEndpoint || 'none',
+        },
+      },
+      'Computed Puppeteer configuration',
+    );
 
     this.client = new Client({
       authStrategy: new LocalAuth({ clientId: this.activeClientId, dataPath: this.sessionPath }),
-      puppeteer: this.getPuppeteerConfig(browserWSEndpoint),
+      puppeteer: puppeteerConfig,
       takeoverOnConflict: false,
       restartOnAuthFail: true,
       qrTimeout: getIntEnv('WHATSAPP_QR_TIMEOUT_MS', 60000),
@@ -262,6 +320,15 @@ class WhatsAppWebClient {
       this.pendingQr = qr;
       this.status = 'qr_required';
       logger.info({ qrLength: qr.length }, 'WhatsApp QR code received');
+    });
+
+    this.client.on('authenticated', () => {
+      this.authenticated = true;
+      this.status = 'authenticated';
+      this.lastSeen = new Date().toISOString();
+      this.qrCode = '';
+      this.qrDataUrl = '';
+      logger.info('WhatsApp Web client authenticated');
     });
 
     this.client.on('ready', () => {
@@ -283,11 +350,26 @@ class WhatsAppWebClient {
       logger.info({ state }, 'WhatsApp Web client state changed');
     });
 
-    this.client.on('disconnected', (reason) => {
+    this.client.on('disconnected', async (reason) => {
       this.ready = false;
       this.authenticated = false;
       this.status = 'disconnected';
       logger.warn({ reason }, 'WhatsApp Web client disconnected');
+
+      if (this.shutdownRequested || this.reconnectInProgress) {
+        return;
+      }
+
+      this.reconnectInProgress = true;
+      logger.info({ reason, delayMs: this.reconnectDelayMs }, 'WhatsApp Web client will attempt reconnect');
+      await this.sleep(this.reconnectDelayMs);
+      try {
+        await this.restart();
+      } catch (err) {
+        logger.error({ err: err?.message || err }, 'WhatsApp Web client reconnect attempt failed');
+      } finally {
+        this.reconnectInProgress = false;
+      }
     });
 
     try {
@@ -296,7 +378,6 @@ class WhatsAppWebClient {
         {
           authSessionPath: this.sessionPath,
           clientId: this.activeClientId,
-          browserProfileDir: this.browserProfileDir || this.getBrowserProfileDir(),
           browserWSEndpoint: browserWSEndpoint || undefined,
         },
         'WhatsApp Web client initialized successfully',
@@ -304,6 +385,7 @@ class WhatsAppWebClient {
       return this.client;
     } catch (error) {
       this.lastStartupError = error;
+      this.client = null;
       this.ready = false;
       this.authenticated = false;
       this.status = 'start_failed';
@@ -370,6 +452,14 @@ class WhatsAppWebClient {
       qrCode: this.qrCode,
       lastSeen: this.lastSeen,
     };
+  }
+
+  verifyWebhook(query = {}) {
+    return { ok: false, challenge: null };
+  }
+
+  async handleIncomingWebhook(payload) {
+    return { status: 'ignored', reason: 'web_client_mode' };
   }
 
   async sendText(to, text) {

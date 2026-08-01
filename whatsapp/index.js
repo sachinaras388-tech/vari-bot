@@ -1,5 +1,5 @@
 const express = require('express');
-const { getEnv, getIntEnv } = require('./src/config');
+const { getEnv, getIntEnv, getBoolEnv } = require('./src/config');
 const logger = require('./src/logger');
 const WhatsAppClient = require('./src/whatsapp-client');
 const { generateQrDataUrl, resolvePublicUrl } = require('./src/qr-utils');
@@ -9,11 +9,14 @@ app.use(express.json());
 
 const PORT = getIntEnv('PORT', 10000);
 const host = getEnv('HOST', '0.0.0.0');
+const useQr = getBoolEnv('USE_QR', false);
+const usePairing = getBoolEnv('USE_PAIRING_CODE', false);
+const mode = useQr || usePairing ? 'whatsapp-web' : 'cloud-api';
 const client = new WhatsAppClient();
 let server;
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'whatsapp-webhook', mode: 'cloud-api' });
+  res.json({ status: 'ok', service: 'whatsapp-webhook', mode, qrEnabled: useQr, pairingEnabled: usePairing });
 });
 
 app.get('/health', (req, res) => {
@@ -28,12 +31,63 @@ app.get('/readyz', (req, res) => {
 
 app.get('/qr', async (req, res) => {
   try {
+    const snapshot = client.getHealthSnapshot();
+    if (snapshot.authExpired) {
+      return res.status(410).json({ status: 'expired', message: 'QR expired. Restart the service to generate a new QR.' });
+    }
+
+    if (!snapshot.qrAvailable) {
+      return res.status(404).json({ status: 'idle', message: 'QR code not available' });
+    }
+
     const publicUrl = resolvePublicUrl(req, getEnv('PUBLIC_BASE_URL', ''));
-    const qrDataUrl = await generateQrDataUrl(publicUrl || 'https://example.com');
-    res.json({ qrDataUrl, publicUrl, status: client.status });
+    const qrDataUrl = snapshot.qrDataUrl || (snapshot.qrCode ? await generateQrDataUrl(snapshot.qrCode) : '');
+    return res.json({ status: 'ok', qrDataUrl, qrCode: snapshot.qrCode, publicUrl });
   } catch (error) {
     logger.error({ err: error?.message || error }, 'QR endpoint failed');
-    res.status(500).json({ status: 'error' });
+    return res.status(500).json({ status: 'error', message: 'QR endpoint failed' });
+  }
+});
+
+app.get('/qr.png', async (req, res) => {
+  try {
+    const snapshot = client.getHealthSnapshot();
+    if (snapshot.authExpired) {
+      return res.status(410).type('text/plain').send('QR expired. Restart the service to generate a new QR.');
+    }
+
+    if (!snapshot.qrCode) {
+      return res.status(404).type('text/plain').send('QR code not available');
+    }
+
+    const buffer = await require('./src/qr-utils').generateQrPngBuffer(snapshot.qrCode);
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Cache-Control', 'no-store');
+    return res.send(buffer);
+  } catch (error) {
+    logger.error({ err: error?.message || error }, 'PNG QR endpoint failed');
+    return res.status(500).type('text/plain').send('QR endpoint failed');
+  }
+});
+
+app.get('/qr.svg', async (req, res) => {
+  try {
+    const snapshot = client.getHealthSnapshot();
+    if (snapshot.authExpired) {
+      return res.status(410).type('text/plain').send('QR expired. Restart the service to generate a new QR.');
+    }
+
+    if (!snapshot.qrCode) {
+      return res.status(404).type('text/plain').send('QR code not available');
+    }
+
+    const svg = await require('./src/qr-utils').generateQrSvgBuffer(snapshot.qrCode);
+    res.setHeader('Content-Type', 'image/svg+xml');
+    res.setHeader('Cache-Control', 'no-store');
+    return res.send(svg);
+  } catch (error) {
+    logger.error({ err: error?.message || error }, 'SVG QR endpoint failed');
+    return res.status(500).type('text/plain').send('QR endpoint failed');
   }
 });
 
@@ -41,16 +95,10 @@ app.get('/qr/device', async (req, res) => {
   try {
     await client.start();
     const snapshot = client.getHealthSnapshot();
-    res.json({
-      status: snapshot.status,
-      qrDataUrl: snapshot.qrDataUrl || '',
-      qrCode: snapshot.qrCode || '',
-      ready: snapshot.ready,
-      authenticated: snapshot.authenticated,
-    });
+    return res.json({ status: 'ok', ...snapshot });
   } catch (error) {
     logger.error({ err: error?.message || error }, 'Device QR endpoint failed');
-    res.status(500).json({ status: 'error' });
+    return res.status(500).json({ status: 'error', message: 'Device QR endpoint failed' });
   }
 });
 
@@ -100,8 +148,11 @@ async function main() {
   try {
     await client.start();
     server = app.listen(PORT, host, () => {
-      logger.info({ port: PORT, host, mode: 'webhook' }, 'WhatsApp webhook service listening');
-      logger.info({ configured: client.configReady }, 'WhatsApp connection status ready');
+      logger.info({ port: PORT, host, mode, qrEnabled: useQr, pairingEnabled: usePairing }, 'WhatsApp webhook service listening');
+      logger.info({ configured: client.configReady, mode }, 'WhatsApp connection status ready');
+      if (useQr || usePairing) {
+        logger.info({ qrEndpoint: `http://${host}:${PORT}/qr` }, 'QR mode enabled; use the /qr endpoint to retrieve the QR code URL');
+      }
     });
   } catch (error) {
     logger.error({ err: error?.message || error, stack: error?.stack }, 'Failed to start WhatsApp service');

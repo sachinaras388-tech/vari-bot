@@ -5,6 +5,7 @@ const logger = require('./logger');
 const FastApiClient = require('./fastapi');
 const {
   createMessageDeduper,
+  createMessageLoopGuard,
   normalizeMessagePayload,
   shouldProcessMessage,
   getBackoffDelay,
@@ -14,6 +15,7 @@ class WhatsAppBridge extends EventEmitter {
   constructor() {
     super();
     this.phoneNumber = getEnv('WHATSAPP_PHONE_NUMBER', '');
+    this.phoneNumberId = getEnv('WHATSAPP_PHONE_NUMBER_ID', '');
     this.accessToken = getEnv('WHATSAPP_ACCESS_TOKEN', '');
     this.businessAccountId = getEnv('WHATSAPP_BUSINESS_ACCOUNT_ID', '');
     this.verifyToken = getEnv('WHATSAPP_VERIFY_TOKEN', '');
@@ -36,9 +38,12 @@ class WhatsAppBridge extends EventEmitter {
       getIntEnv('MESSAGE_DEDUP_TTL_MS', 60_000),
       getIntEnv('MESSAGE_DEDUP_MAX_ENTRIES', 5_000),
     );
-    this.browserState = { initialized: false, crashed: false, restartCount: 0 };
+    this.loopGuard = createMessageLoopGuard(getIntEnv('MESSAGE_LOOP_GUARD_TTL_MS', 15_000));
+    this.bridgeState = { initialized: false, failed: false, restartCount: 0 };
     this.reconnectDelayMs = getIntEnv('RECONNECT_DELAY_MS', 5_000);
     this.maxReconnectAttempts = getIntEnv('MAX_RECONNECT_ATTEMPTS', 8);
+    this.reconnectInProgress = false;
+    this.reconnectCooldownUntil = 0;
     this.healthCheckIntervalMs = getIntEnv('HEALTHCHECK_INTERVAL_MS', 30_000);
     this.idleRecoveryMs = getIntEnv('IDLE_RECOVERY_MS', 180_000);
     this.watchdogIntervalMs = getIntEnv('WATCHDOG_INTERVAL_MS', 60_000);
@@ -49,11 +54,13 @@ class WhatsAppBridge extends EventEmitter {
     this.heartbeatTimer = null;
     this.apiTimeoutMs = getIntEnv('WHATSAPP_HTTP_TIMEOUT_MS', 15_000);
     this.configReady = false;
+    this.allowSelfMessages = getBoolEnv('ALLOW_SELF_MESSAGES', false);
   }
 
   validateConfig() {
     const missing = [];
     if (!this.phoneNumber) missing.push('WHATSAPP_PHONE_NUMBER');
+    if (!this.phoneNumberId) missing.push('WHATSAPP_PHONE_NUMBER_ID');
     if (!this.accessToken) missing.push('WHATSAPP_ACCESS_TOKEN');
     if (!this.businessAccountId) missing.push('WHATSAPP_BUSINESS_ACCOUNT_ID');
 
@@ -81,7 +88,7 @@ class WhatsAppBridge extends EventEmitter {
     this.emit('bridge:starting');
     logger.info({ state: this.connectionStatus }, 'WhatsApp bridge starting');
 
-    await this.initializeBrowser();
+    await this.initializeBridge();
     this.ready = true;
     this.connected = true;
     this.connectionStatus = 'ready';
@@ -92,19 +99,19 @@ class WhatsAppBridge extends EventEmitter {
     this.processQueue();
   }
 
-  async initializeBrowser() {
-    if (this.browserState.initialized && !this.browserState.crashed) {
+  async initializeBridge() {
+    if (this.bridgeState.initialized && !this.bridgeState.failed) {
       return;
     }
 
-    this.browserState.crashed = false;
-    this.browserState.restartCount += 1;
-    logger.info({ restartCount: this.browserState.restartCount }, 'Initializing WhatsApp browser runtime');
-    await this.waitForBrowserReady();
-    this.browserState.initialized = true;
+    this.bridgeState.failed = false;
+    this.bridgeState.restartCount += 1;
+    logger.info({ restartCount: this.bridgeState.restartCount }, 'Initializing WhatsApp bridge runtime');
+    await this.waitForBridgeReady();
+    this.bridgeState.initialized = true;
   }
 
-  async waitForBrowserReady() {
+  async waitForBridgeReady() {
     return new Promise((resolve) => setTimeout(resolve, 1000));
   }
 
@@ -132,15 +139,31 @@ class WhatsAppBridge extends EventEmitter {
     }
 
     const messageBody = normalized.message || '';
-    const shouldProcess = /nezuko/i.test(messageBody) || normalized.quoted_text?.match(/nezuko/i);
-    if (!shouldProcess) {
-      logger.info({ from: normalized.phone_number }, 'Ignoring WhatsApp message because it did not trigger the bot');
+    const wakeWordDetected = /nezuko/i.test(messageBody) || /nezuko/i.test(String(normalized.quoted_text || ''));
+    logger.info(
+      {
+        from: normalized.phone_number,
+        chatId: normalized.chat_id,
+        messageText: messageBody,
+        wakeWordDetected,
+        allowSelfMessages: this.allowSelfMessages,
+      },
+      'Incoming WhatsApp message received'
+    );
+
+    if (!wakeWordDetected) {
+      logger.info({ from: normalized.phone_number, chatId: normalized.chat_id, messageText: messageBody }, 'Ignoring WhatsApp message because it did not trigger the bot');
       return { status: 'ignored', reason: 'no_trigger' };
     }
 
-    if (!shouldProcessMessage(message)) {
-      logger.info({ from: normalized.phone_number }, 'Ignoring message that is a status, broadcast, or own message');
+    if (!shouldProcessMessage(message, { allowSelfMessages: this.allowSelfMessages })) {
+      logger.info({ from: normalized.phone_number, chatId: normalized.chat_id, messageText: messageBody }, 'Ignoring message that is a status, broadcast, or own message');
       return { status: 'ignored', reason: 'ignored_message_type' };
+    }
+
+    if (!this.loopGuard.shouldProcess(messageBody, normalized.chat_id, normalized.phone_number)) {
+      logger.info({ from: normalized.phone_number, chatId: normalized.chat_id, messageText: messageBody }, 'Ignoring repeated message to prevent loops');
+      return { status: 'ignored', reason: 'loop_guard' };
     }
 
     const dedupeKey = normalized.raw_message_id || `${normalized.chat_id}:${normalized.timestamp}`;
@@ -154,6 +177,7 @@ class WhatsAppBridge extends EventEmitter {
       this.messageQueue.shift();
     }
 
+    logger.info({ from: normalized.phone_number, chatId: normalized.chat_id, dedupeKey, messageText: normalized.message }, 'Enqueueing WhatsApp message for backend processing');
     this.messageQueue.push({ normalized, dedupeKey, receivedAt: Date.now() });
     this.processQueue();
     return { status: 'queued', reason: 'message_enqueued' };
@@ -186,18 +210,23 @@ class WhatsAppBridge extends EventEmitter {
 
     const startTime = Date.now();
     try {
+      logger.info({ from: normalized.phone_number, chatId: normalized.chat_id, messageText: normalized.message }, 'Sending message to FastAPI backend');
       const result = await this.fastApi.forward(normalized, { timeoutMs: this.apiTimeoutMs });
       const durationMs = Date.now() - startTime;
+      logger.info({ from: normalized.phone_number, chatId: normalized.chat_id, durationMs, responseStatus: result?.status }, 'Received FastAPI response');
       this.emit('bridge:message-processed', { normalized, result, durationMs });
 
       if (!result || result.status !== 'success') {
         const fallbackReply = result?.reply || this.fastApi.fallbackReply;
         logger.warn({ from: normalized.phone_number, durationMs, reason: result?.reason || 'fastapi_unavailable' }, 'FastAPI response was unavailable; returning fallback');
+        logger.info({ to: normalized.phone_number, reply: fallbackReply }, 'Sending fallback reply');
         await this.sendReply(normalized.phone_number, fallbackReply);
         return;
       }
 
       if (result.reply) {
+        logger.info({ to: normalized.phone_number, reply: result.reply }, 'Sending bot reply');
+        this.loopGuard.markOutbound(normalized.chat_id, result.reply);
         await this.sendReply(normalized.phone_number, result.reply);
       }
 
@@ -223,7 +252,9 @@ class WhatsAppBridge extends EventEmitter {
 
     this.inFlight.set(responseKey, Date.now() + 60_000);
     try {
+      logger.info({ to, replyLength: text.length }, 'Sending outbound WhatsApp reply');
       await this.sendText(to, text);
+      logger.info({ to, replyLength: text.length }, 'Outbound WhatsApp reply sent');
     } finally {
       this.inFlight.delete(responseKey);
     }
@@ -238,7 +269,8 @@ class WhatsAppBridge extends EventEmitter {
       throw new Error('Bridge is not ready to send messages');
     }
 
-    const url = `${this.baseUrl}/${this.businessAccountId}/messages`;
+    const targetId = this.phoneNumberId || this.businessAccountId;
+    const url = `${this.baseUrl}/${targetId}/messages`;
     const body = {
       messaging_product: 'whatsapp',
       to,
@@ -265,7 +297,7 @@ class WhatsAppBridge extends EventEmitter {
     this.heartbeatTimer = setInterval(() => {
       this.emit('bridge:heartbeat', { connected: this.connected, ready: this.ready, queueSize: this.messageQueue.length });
       logger.info({ connected: this.connected, ready: this.ready, queueSize: this.messageQueue.length }, 'Bridge heartbeat');
-    }, 30_000);
+    }, this.heartbeatIntervalMs);
   }
 
   clearHeartbeats() {
@@ -277,9 +309,14 @@ class WhatsAppBridge extends EventEmitter {
 
   startHealthCheck() {
     this.clearHealthCheck();
+    if (!this.enableRecovery || this.maxReconnectAttempts <= 0) {
+      logger.info({ enabled: this.enableRecovery, maxReconnectAttempts: this.maxReconnectAttempts }, 'Health check disabled for bridge recovery');
+      return;
+    }
+
     this.healthCheckTimer = setInterval(() => {
       const idleMs = Date.now() - this.lastActivityAt;
-      if (this.enableRecovery && idleMs > this.idleRecoveryMs) {
+      if (idleMs > this.idleRecoveryMs) {
         logger.warn({ idleMs }, 'Bridge idle too long; forcing recovery');
         this.recover();
       }
@@ -295,6 +332,11 @@ class WhatsAppBridge extends EventEmitter {
 
   startWatchdog() {
     this.clearWatchdog();
+    if (!this.enableRecovery || this.maxReconnectAttempts <= 0) {
+      logger.info({ enabled: this.enableRecovery, maxReconnectAttempts: this.maxReconnectAttempts }, 'Watchdog disabled for bridge recovery');
+      return;
+    }
+
     this.watchdogTimer = setInterval(() => {
       if (!this.ready || !this.connected) {
         logger.warn('Bridge watchdog detected a disconnected state; scheduling recovery');
@@ -311,7 +353,8 @@ class WhatsAppBridge extends EventEmitter {
   }
 
   async recover() {
-    if (this.reconnectTimer || this.shutdownRequested || !this.enableRecovery) {
+    if (this.reconnectInProgress || this.reconnectTimer || this.shutdownRequested || !this.enableRecovery || this.maxReconnectAttempts <= 0) {
+      logger.info({ enabled: this.enableRecovery, maxReconnectAttempts: this.maxReconnectAttempts }, 'Bridge recovery is disabled or already in progress');
       return;
     }
 
@@ -323,6 +366,7 @@ class WhatsAppBridge extends EventEmitter {
     const attemptNumber = this.reconnectAttempts + 1;
     const delayMs = getBackoffDelay(this.reconnectAttempts) + this.reconnectDelayMs;
     this.reconnectAttempts += 1;
+    this.reconnectInProgress = true;
     this.connectionStatus = 'recovering';
     this.emit('bridge:recovering', { attemptNumber, delayMs });
     logger.warn({ attemptNumber, delayMs }, 'Scheduling bridge recovery attempt');
@@ -330,8 +374,8 @@ class WhatsAppBridge extends EventEmitter {
     this.reconnectTimer = setTimeout(async () => {
       this.reconnectTimer = null;
       try {
-        this.browserState.crashed = true;
-        await this.initializeBrowser();
+        this.bridgeState.failed = true;
+        await this.initializeBridge();
         this.connected = true;
         this.ready = true;
         this.connectionStatus = 'ready';
@@ -342,6 +386,8 @@ class WhatsAppBridge extends EventEmitter {
         logger.error({ err: error?.message || error, attemptNumber }, 'Bridge recovery attempt failed');
         this.reconnectAttempts = Math.min(this.maxReconnectAttempts, this.reconnectAttempts + 1);
         this.recover();
+      } finally {
+        this.reconnectInProgress = false;
       }
     }, delayMs);
   }
@@ -399,8 +445,9 @@ class WhatsAppBridge extends EventEmitter {
       connectionStatus: this.connectionStatus,
       queueSize: this.messageQueue.length,
       reconnectAttempts: this.reconnectAttempts,
-      browserInitialized: this.browserState.initialized,
-      browserCrashed: this.browserState.crashed,
+      reconnectInProgress: this.reconnectInProgress,
+      bridgeInitialized: this.bridgeState.initialized,
+      bridgeFailed: this.bridgeState.failed,
       configReady: this.configReady,
       uptimeSeconds: Math.round(process.uptime()),
     };
