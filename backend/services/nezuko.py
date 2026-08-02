@@ -4,6 +4,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
+from backend.ai.chat import normalize_history_for_gemini
 from backend.config.settings import get_settings
 from backend.database.connection import db_instance
 

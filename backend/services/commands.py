@@ -3,7 +3,7 @@ import time
 from datetime import datetime
 from typing import Any
 
-from backend.ai.chat import generate_chat_response
+from backend.ai.chat import generate_chat_response, normalize_history_for_gemini
 from backend.services.nezuko import (
     build_command_help,
     build_help_text,
@@ -123,6 +123,7 @@ async def handle_nezuko_command(db: Any, payload: dict[str, Any], text: str) -> 
 
     history = await get_conversation_history(db, payload.get("chat_id", ""), payload.get("phone_number", ""))
     history_payload = [{"role": item.get("role", "user"), "parts": [item.get("text", "")]} for item in history]
+    history_payload = normalize_history_for_gemini(history_payload)
     reply = await generate_chat_response(message_text, history_payload)
     await save_conversation_history(db, payload.get("chat_id", ""), payload.get("phone_number", ""), message_text, reply)
     return {"status": "success", "reply": reply}

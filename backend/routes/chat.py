@@ -3,7 +3,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from typing import List, Optional
 
-from backend.ai.chat import generate_chat_response
+from backend.ai.chat import generate_chat_response, normalize_history_for_gemini
 from backend.database.connection import get_db
 from backend.services.nezuko import get_conversation_history, save_conversation_history, sanitize_text
 
@@ -41,6 +41,7 @@ async def chat_with_bot(request: ChatRequest):
         if persisted_history:
             formatted_history = [{"role": item.get("role", "user"), "parts": [item.get("text", "")]} for item in persisted_history]
 
+        formatted_history = normalize_history_for_gemini(formatted_history)
         reply = await generate_chat_response(sanitized_message, formatted_history)
         await save_conversation_history(db, request.platform_id, "", sanitized_message, reply)
 
