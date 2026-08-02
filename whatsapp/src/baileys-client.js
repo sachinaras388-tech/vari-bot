@@ -324,7 +324,39 @@ class BaileysClient {
   }
 
   async handleIncomingWebhook(payload) {
-    return { status: 'ignored', reason: 'baileys_mode' };
+    const normalized = payload?.chat_id || payload?.chatId || payload?.from
+      ? payload
+      : normalizeMessagePayload(payload);
+
+    if (!normalized || !normalized.chat_id || !normalized.message) {
+      logger.warn({ payloadReceived: Boolean(payload) }, 'Baileys webhook payload was invalid; dropping message');
+      return { status: 'ignored', reason: 'invalid_payload' };
+    }
+
+    const forwardPayload = {
+      platform_id: 'whatsapp',
+      chat_id: normalized.chat_id,
+      message: normalized.message,
+      timestamp: Math.floor(Date.now() / 1000),
+    };
+
+    logger.info({ chatId: normalized.chat_id, messageText: normalized.message }, 'Forwarding Baileys inbound message to FastAPI');
+
+    try {
+      const response = await this.fastApi.forward(forwardPayload, { timeoutMs: this.apiTimeoutMs });
+      logger.info({ chatId: normalized.chat_id, responseStatus: response?.status }, 'Received FastAPI response for Baileys inbound message');
+
+      if (response?.status === 'success' && typeof response.reply === 'string' && response.reply.trim()) {
+        await this.sendText(normalized.chat_id, response.reply);
+        return { status: 'success', reply: response.reply };
+      }
+
+      logger.warn({ chatId: normalized.chat_id, reason: response?.reason || 'no_reply' }, 'FastAPI did not return a usable reply for Baileys message');
+      return { status: 'ignored', reason: response?.reason || 'no_reply' };
+    } catch (error) {
+      logger.error({ err: error?.message || error, chatId: normalized.chat_id }, 'FastAPI forwarding failed for Baileys inbound message');
+      return { status: 'error', reason: 'fastapi_forward_failed' };
+    }
   }
 
   async sendText(to, text) {

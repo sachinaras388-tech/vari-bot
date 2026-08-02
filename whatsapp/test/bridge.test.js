@@ -11,6 +11,7 @@ const {
 } = require('../src/bridge-utils');
 const FastApiClient = require('../src/fastapi');
 const WhatsAppBridge = require('../src/whatsapp-bridge');
+const BaileysClient = require('../src/baileys-client');
 
 test('normalizeMessagePayload maps a web.js message into the bridge contract', () => {
   const message = {
@@ -161,4 +162,43 @@ test('WhatsAppBridge verifies incoming webhook tokens correctly', () => {
 
   assert.equal(result.ok, true);
   assert.equal(result.challenge, 'challenge-code');
+});
+
+test('BaileysClient forwards valid messages to FastAPI and sends replies over Baileys', async () => {
+  const client = new BaileysClient();
+  const sentMessages = [];
+  let forwardedPayload = null;
+
+  client.sock = {
+    sendMessage: async (to, message) => {
+      sentMessages.push({ to, message });
+      return { key: { id: 'outbound-1' } };
+    },
+  };
+  client.ready = true;
+  client.fastApi.forward = async (payload) => {
+    forwardedPayload = payload;
+    return { status: 'success', reply: 'Hello from FastAPI' };
+  };
+  client.sendText = async (to, text) => {
+    sentMessages.push({ to, text });
+    return { key: { id: 'outbound-2' } };
+  };
+
+  const result = await client.handleIncomingWebhook({
+    chat_id: '919999999999@c.us',
+    message: 'Nezuko hello',
+    phone_number: '919999999999',
+    timestamp: 1710000000,
+    raw_message_id: 'msg-123',
+  });
+
+  assert.equal(result.status, 'success');
+  assert.equal(result.reply, 'Hello from FastAPI');
+  assert.equal(forwardedPayload.platform_id, 'whatsapp');
+  assert.equal(forwardedPayload.chat_id, '919999999999@c.us');
+  assert.equal(forwardedPayload.message, 'Nezuko hello');
+  assert.equal(typeof forwardedPayload.timestamp, 'number');
+  assert.equal(sentMessages[sentMessages.length - 1].to, '919999999999@c.us');
+  assert.equal(sentMessages[sentMessages.length - 1].text, 'Hello from FastAPI');
 });
