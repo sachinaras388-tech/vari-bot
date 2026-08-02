@@ -1,22 +1,23 @@
 const { getEnv, getBoolEnv } = require('./config');
-const WhatsAppBridge = require('./whatsapp-bridge');
-const WhatsAppWebClient = require('./whatsapp-web-client');
-const BaileysClient = require('./baileys-client');
 
 function selectWhatsAppClientClass() {
   const clientMode = getEnv('WHATSAPP_CLIENT_MODE', '').toLowerCase();
+
   if (clientMode === 'bridge') {
-    return WhatsAppBridge;
+    return require('./whatsapp-bridge');
   }
+
   if (clientMode === 'web') {
-    return WhatsAppWebClient;
+    return require('./whatsapp-web-client');
   }
+
   if (clientMode === 'baileys') {
-    return BaileysClient;
+    return require('./baileys-client');
   }
 
   const useQr = getBoolEnv('USE_QR', false);
   const usePairing = getBoolEnv('USE_PAIRING_CODE', false);
+
   const cloudConfigured = Boolean(
     getEnv('WHATSAPP_PHONE_NUMBER', '').trim() &&
     getEnv('WHATSAPP_ACCESS_TOKEN', '').trim() &&
@@ -24,7 +25,11 @@ function selectWhatsAppClientClass() {
     getEnv('WHATSAPP_BUSINESS_ACCOUNT_ID', '').trim()
   );
 
-  return useQr || usePairing || !cloudConfigured ? BaileysClient : WhatsAppBridge;
+  if (useQr || usePairing || !cloudConfigured) {
+    return require('./baileys-client');
+  }
+
+  return require('./whatsapp-bridge');
 }
 
 class WhatsAppClient {
