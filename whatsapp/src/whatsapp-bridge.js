@@ -208,10 +208,11 @@ class WhatsAppBridge extends EventEmitter {
     this.markActivity();
     logger.info({ from: normalized.phone_number, chatId: normalized.chat_id, dedupeKey }, 'Processing queued WhatsApp message');
 
+    const forwardPayload = this.buildFastApiPayload(normalized);
     const startTime = Date.now();
     try {
       logger.info({ from: normalized.phone_number, chatId: normalized.chat_id, messageText: normalized.message }, 'Sending message to FastAPI backend');
-      const result = await this.fastApi.forward(normalized, { timeoutMs: this.apiTimeoutMs });
+      const result = await this.fastApi.forward(forwardPayload, { timeoutMs: this.apiTimeoutMs });
       const durationMs = Date.now() - startTime;
       logger.info({ from: normalized.phone_number, chatId: normalized.chat_id, durationMs, responseStatus: result?.status }, 'Received FastAPI response');
       this.emit('bridge:message-processed', { normalized, result, durationMs });
@@ -450,6 +451,15 @@ class WhatsAppBridge extends EventEmitter {
       bridgeFailed: this.bridgeState.failed,
       configReady: this.configReady,
       uptimeSeconds: Math.round(process.uptime()),
+    };
+  }
+
+  buildFastApiPayload(normalized) {
+    return {
+      platform_id: 'whatsapp',
+      chat_id: normalized.chat_id,
+      message: normalized.message,
+      timestamp: Math.floor(Date.now() / 1000),
     };
   }
 

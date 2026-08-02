@@ -17,7 +17,7 @@ function normalizeWebhookPayload(payload) {
   const body = type === 'text' ? message?.text?.body || '' : '';
   const quotedText = message?.context?.text || '';
   const isGroup = Boolean(message?.context?.from);
-  const timestamp = Number(message?.timestamp || Date.now() / 1000);
+  const timestamp = Number(message?.timestamp ?? Math.floor(Date.now() / 1000));
 
   return {
     platform_id: from,
@@ -41,7 +41,7 @@ function normalizeWebhookPayload(payload) {
   };
 }
 
-function normalizeMessagePayload(message, fallbackTimestamp = Date.now() / 1000) {
+function normalizeMessagePayload(message, fallbackTimestamp = Math.floor(Date.now() / 1000)) {
   if (!message) {
     return null;
   }
@@ -54,7 +54,7 @@ function normalizeMessagePayload(message, fallbackTimestamp = Date.now() / 1000)
   const from = String(rawFrom).replace(/@c\.us$/i, '').replace(/@s\.whatsapp\.net$/i, '');
   const chatId = message.chatId || message.from || message.chat?.id || '';
   const isGroup = Boolean(message.isGroup || message.chat?.isGroup || message.isGroupMsg);
-  const timestamp = Number(message.timestamp || fallbackTimestamp);
+  const timestamp = Number(message.timestamp ?? fallbackTimestamp);
   const rawBody = message.body || message.text || '';
   const quotedBody = message.quotedMsg?.body || message.quotedMsg?.text || message.quotedMessage?.body || '';
   const media = Boolean(message.hasMedia || message.mediaData || message.type === 'image' || message.type === 'video' || message.type === 'document' || message.type === 'audio' || message.type === 'sticker');

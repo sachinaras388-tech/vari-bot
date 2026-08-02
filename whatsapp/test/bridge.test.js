@@ -114,6 +114,41 @@ test('FastApiClient returns the fallback reply after repeated timeouts', async (
   assert.equal(result.reply, client.fallbackReply);
 });
 
+test('WhatsAppBridge builds the FastAPI payload with required schema and timestamp', () => {
+  const bridge = new WhatsAppBridge();
+  const normalized = {
+    chat_id: '919999999999@c.us',
+    message: 'Hello Nezuko',
+  };
+
+  const payload = bridge.buildFastApiPayload(normalized);
+
+  assert.equal(payload.platform_id, 'whatsapp');
+  assert.equal(payload.chat_id, '919999999999@c.us');
+  assert.equal(payload.message, 'Hello Nezuko');
+  assert.equal(typeof payload.timestamp, 'number');
+  assert.ok(payload.timestamp > 0);
+});
+
+test('WhatsAppBridge sends the FastAPI reply back to WhatsApp users', async () => {
+  const bridge = new WhatsAppBridge();
+  const normalized = {
+    phone_number: '919999999999',
+    chat_id: '919999999999@c.us',
+    message: 'Hello Nezuko',
+  };
+
+  let sentReply = null;
+  bridge.fastApi.forward = async () => ({ status: 'success', reply: 'Hiiiii there! 👋' });
+  bridge.sendReply = async (to, text) => {
+    sentReply = { to, text };
+  };
+
+  await bridge.processMessage({ normalized, dedupeKey: 'test-key' });
+
+  assert.deepEqual(sentReply, { to: '919999999999', text: 'Hiiiii there! 👋' });
+});
+
 test('WhatsAppBridge verifies incoming webhook tokens correctly', () => {
   const bridge = new WhatsAppBridge();
   bridge.verifyToken = 'secret';
