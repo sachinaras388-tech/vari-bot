@@ -21,6 +21,7 @@ class Settings(BaseSettings):
 
     # APIs
     AI_API_KEY: str | None = None
+    OPENROUTER_API_KEY: str | None = None
     WEATHER_API_KEY: str = ""
     GEMINI_MODEL: str | None = None
 

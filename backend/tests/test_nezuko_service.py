@@ -1,6 +1,13 @@
+import os
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from backend.services.gemini_service import GeminiService
+from backend.services.openrouter_service import OpenRouterService
 
 from backend.services.commands import extract_command
+from backend.services.gemini_service import GeminiService
 from backend.services.nezuko import sanitize_text, should_trigger_nezuko, build_help_text, is_authorized_admin
 
 
@@ -29,6 +36,37 @@ class NezukoServiceTests(unittest.TestCase):
 
     def test_formatted_phone_numbers_are_treated_as_admin(self) -> None:
         self.assertTrue(is_authorized_admin("+91 8660 108587"))
+
+    def test_gemini_service_uses_ai_api_key_fallback(self) -> None:
+        with patch.dict(os.environ, {"AI_API_KEY": "shared-key"}, clear=False):
+            os.environ.pop("GEMINI_API_KEY", None)
+            service = GeminiService()
+            self.assertEqual(service.api_key, "shared-key")
+
+    def test_gemini_service_uses_keyword_sdk_call(self) -> None:
+        service = GeminiService(api_key="test-key")
+
+        class DummyModels:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+
+            def generate_content(self, *, model: str, contents: list[object], config: object) -> dict[str, object]:
+                self.calls.append({"model": model, "contents": contents, "config": config})
+                return {"text": "ok"}
+
+        class DummyClient:
+            def __init__(self) -> None:
+                self.models = DummyModels()
+
+        client = DummyClient()
+        response = service._invoke_generate_content(client, "test-model", ["hello"], object())
+        self.assertEqual(response, {"text": "ok"})
+        self.assertEqual(client.models.calls[0]["model"], "test-model")
+
+    def test_openrouter_service_uses_configured_key(self) -> None:
+        with patch("backend.services.openrouter_service.get_settings", return_value=SimpleNamespace(OPENROUTER_API_KEY="or-key", AI_API_KEY=None)):
+            service = OpenRouterService()
+            self.assertEqual(service.api_key, "or-key")
 
 
 if __name__ == "__main__":
