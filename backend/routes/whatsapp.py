@@ -11,13 +11,38 @@ from pydantic import BaseModel, Field
 from backend.ai.chat import generate_chat_response
 from backend.database.connection import get_db
 from backend.services.commands import handle_nezuko_command
-from backend.services.nezuko import should_trigger_nezuko, sanitize_text
+from backend.services.nezuko import is_authorized_admin, should_trigger_nezuko, sanitize_text
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/whatsapp", tags=["WhatsApp Integration"])
 
 MAX_MESSAGE_LENGTH_FALLBACK = 4000
+
+
+def _normalize_phone_number(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    return "".join(ch for ch in str(value) if ch.isdigit())
+
+
+def _collection(db, name: str):
+    if db is None:
+        raise ValueError("Database is not available")
+    try:
+        return db[name]
+    except (TypeError, KeyError, AttributeError):
+        try:
+            return getattr(db, name)
+        except AttributeError:
+            class _FallbackCollection:
+                async def find_one(self, *args, **kwargs):
+                    return None
+
+                async def count_documents(self, *args, **kwargs):
+                    return 0
+
+            return _FallbackCollection()
 
 
 class WhatsAppMessagePayload(BaseModel):
@@ -50,6 +75,48 @@ def _message_text(payload: WhatsAppMessagePayload) -> str:
     return str(payload.message or "").strip()
 
 
+async def _register_or_login_user(db, payload: WhatsAppMessagePayload, name_hint: Optional[str] = None) -> dict:
+    normalized_phone = _normalize_phone_number(payload.phone_number)
+    username = (name_hint or payload.sender_name or payload.profile_name or "User").strip() or "User"
+    query = {"platform_id": payload.platform_id}
+    if normalized_phone:
+        query = {"$or": [{"platform_id": payload.platform_id}, {"phone": normalized_phone}, {"phone": payload.phone_number}]}
+
+    user_doc = {
+        "platform_id": payload.platform_id,
+        "phone": normalized_phone or payload.phone_number or payload.platform_id,
+        "sender_name": payload.sender_name or username,
+        "profile_name": payload.profile_name or username,
+        "username": username,
+        "first_name": username,
+        "language": "en",
+        "chat_id": payload.chat_id,
+        "last_seen": int(time.time()),
+        "updated_at": int(time.time()),
+        "role": "User",
+        "ai_enabled": True,
+        "blocked": False,
+        "tags": [],
+        "notes": None,
+        "coins": 100,
+        "xp": 0,
+        "level": 1,
+        "badges": ["Newbie ✨"],
+        "join_date": time.time(),
+        "is_admin": bool(is_authorized_admin(payload.phone_number) or is_authorized_admin(payload.platform_id)),
+        "is_banned": False,
+    }
+
+    users = _collection(db, "users")
+    existing = await users.find_one(query)
+    if existing:
+        await users.update_one({"_id": existing["_id"]}, {"$set": user_doc})
+        return {"status": "success", "reply": f"Welcome back, {username}! Your WhatsApp profile is synced and ready. ✨"}
+
+    await users.insert_one(user_doc)
+    return {"status": "success", "reply": f"Registration complete, {username}! You are now stored in the bot and ready to use commands. 🌸"}
+
+
 def _is_command(text: str) -> bool:
     return text.startswith("/")
 
@@ -63,6 +130,8 @@ async def _handle_slash_command(request: Request, db, payload: WhatsAppMessagePa
             "status": "success",
             "reply": (
                 "Available WhatsApp commands:\n"
+                "• /register [name] - save your profile\n"
+                "• /login [name] - sync your profile\n"
                 "• /help - show this help\n"
                 "• /game meme or /game joke\n"
                 "• /study <subject> [type]\n"
@@ -74,6 +143,12 @@ async def _handle_slash_command(request: Request, db, payload: WhatsAppMessagePa
                 "• /admin stats (admin only)"
             ),
         }
+
+    if lowered in {"/register", "/login"} or lowered.startswith("/register ") or lowered.startswith("/login "):
+        name_hint = None
+        if len(command.split()) > 1:
+            name_hint = " ".join(command.split()[1:]).strip()
+        return await _register_or_login_user(db, payload, name_hint)
 
     if lowered.startswith("/game "):
         client = getattr(request.app.state, "http_client", None)
@@ -124,7 +199,12 @@ async def _handle_slash_command(request: Request, db, payload: WhatsAppMessagePa
         }
 
     if lowered == "/user":
-        user = await db["users"].find_one({"phone": payload.phone_number})
+        users = _collection(db, "users")
+        user = await users.find_one({"platform_id": payload.platform_id})
+        if not user and payload.phone_number:
+            user = await users.find_one({"phone": payload.phone_number})
+        if not user and payload.chat_id:
+            user = await users.find_one({"chat_id": payload.chat_id})
         if not user:
             return {"status": "error", "reply": "No profile found yet."}
         return {
@@ -201,16 +281,19 @@ async def _handle_slash_command(request: Request, db, payload: WhatsAppMessagePa
         return {"status": "error", "reply": "Unknown utils command."}
 
     if lowered.startswith("/admin "):
-        actor = await db["users"].find_one({"phone": payload.phone_number})
-        if not actor or not actor.get("is_admin", False):
+        if not is_authorized_admin(payload.phone_number) and not is_authorized_admin(payload.platform_id):
             return {"status": "error", "reply": "Only admins can use admin commands."}
 
         action = command.split(maxsplit=2)[1].strip().lower()
         if action == "stats":
-            user_count = await db["users"].count_documents({})
-            note_count = await db["notes"].count_documents({})
-            confession_count = await db["confessions"].count_documents({})
-            poll_count = await db["polls"].count_documents({})
+            users = _collection(db, "users")
+            notes = _collection(db, "notes")
+            confessions = _collection(db, "confessions")
+            polls = _collection(db, "polls")
+            user_count = await users.count_documents({})
+            note_count = await notes.count_documents({})
+            confession_count = await confessions.count_documents({})
+            poll_count = await polls.count_documents({})
             return {
                 "status": "success",
                 "reply": f"Admin stats:\nUsers: {user_count}\nNotes: {note_count}\nConfessions: {confession_count}\nPolls: {poll_count}",
@@ -239,6 +322,10 @@ async def _fetch_one(db, collection: str, query: dict, projection: Optional[dict
 
 
 async def _ensure_user(db, payload: WhatsAppMessagePayload, now_ts: int, text: str) -> None:
+    query = {"platform_id": payload.platform_id}
+    if payload.phone_number:
+        query = {"$or": [{"phone": payload.phone_number}, {"platform_id": payload.platform_id}]}
+
     user_update = {
         "$set": {
             "platform_id": payload.platform_id,
@@ -253,7 +340,7 @@ async def _ensure_user(db, payload: WhatsAppMessagePayload, now_ts: int, text: s
             "tags": [],
             "notes": None,
             "updated_at": now_ts,
-            "phone": payload.phone_number,
+            "phone": payload.phone_number or payload.platform_id,
         },
         "$setOnInsert": {
             "created_at": now_ts,
@@ -262,7 +349,7 @@ async def _ensure_user(db, payload: WhatsAppMessagePayload, now_ts: int, text: s
         "$inc": {"message_count": 1},
     }
 
-    await db["users"].update_one({"phone": payload.phone_number}, user_update, upsert=True)
+    await db["users"].update_one(query, user_update, upsert=True)
 
 
 async def _ensure_group(db, payload: WhatsAppMessagePayload, now_ts: int) -> None:

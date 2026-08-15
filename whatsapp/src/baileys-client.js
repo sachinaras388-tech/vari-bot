@@ -258,11 +258,32 @@ class BaileysClient {
         return;
       }
 
+      const jid = message.key?.remoteJid;
+      const typingState = jid || normalized.chat_id;
+
+      if (this.sock && typeof this.sock.sendPresenceUpdate === 'function' && typingState) {
+        try {
+          await this.sock.sendPresenceUpdate('composing', typingState);
+          logger.info({ jid: typingState }, 'Baileys typing indicator started');
+        } catch (error) {
+          logger.warn({ err: error?.message || error, jid: typingState }, 'Baileys typing indicator start failed');
+        }
+      }
+
       try {
         const response = await this.handleIncomingWebhook?.(normalized);
         logger.info({ from: normalized.phone_number, chatId: normalized.chat_id, status: response?.status }, 'Baileys message forwarded to bridge handler');
       } catch (error) {
         logger.error({ err: error?.message || error, from: normalized.phone_number, chatId: normalized.chat_id }, 'Baileys message forwarding failed');
+      } finally {
+        if (this.sock && typeof this.sock.sendPresenceUpdate === 'function' && typingState) {
+          try {
+            await this.sock.sendPresenceUpdate('paused', typingState);
+            logger.info({ jid: typingState }, 'Baileys typing indicator stopped');
+          } catch (error) {
+            logger.warn({ err: error?.message || error, jid: typingState }, 'Baileys typing indicator stop failed');
+          }
+        }
       }
     });
 

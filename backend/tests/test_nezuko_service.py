@@ -4,6 +4,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from backend.ai.chat import build_runtime_system_prompt
+from backend.routes.whatsapp import _handle_slash_command, WhatsAppMessagePayload
 from backend.services.ai_router import AIRouter
 from backend.services.gemini_service import GeminiService
 from backend.services.openrouter_service import OpenRouterService
@@ -94,6 +96,96 @@ class NezukoServiceTests(unittest.TestCase):
         self.assertFalse(router._is_retryable_failure(RuntimeError("HTTP 429: rate limit exceeded")))
         self.assertFalse(router._is_retryable_failure(RuntimeError("RESOURCE_EXHAUSTED")))
         self.assertTrue(router._is_retryable_failure(RuntimeError("HTTP 503: temporary server error")))
+
+    def test_build_runtime_system_prompt_renders_current_context(self) -> None:
+        prompt = build_runtime_system_prompt()
+        self.assertIn("Current Date:", prompt)
+        self.assertNotIn("{{CURRENT_DATE}}", prompt)
+        self.assertNotIn("{{CURRENT_DAY}}", prompt)
+        self.assertNotIn("{{CURRENT_TIME}}", prompt)
+        self.assertIn("Timezone: Asia/Kolkata", prompt)
+
+    def test_user_lookup_uses_phone_or_platform_id_for_profile_commands(self) -> None:
+        class DummyUsers:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+
+            async def find_one(self, query: dict[str, object], *args: object, **kwargs: object) -> dict[str, object] | None:
+                self.calls.append(query)
+                if query == {"platform_id": "user-42"}:
+                    return {"platform_id": "user-42", "phone": "+919999999999", "sender_name": "Asha"}
+                return None
+
+        db = SimpleNamespace(users=DummyUsers())
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+        payload = WhatsAppMessagePayload(
+            platform_id="user-42",
+            phone_number="",
+            chat_id="chat-42",
+            message="/user",
+            timestamp=123,
+        )
+
+        result = asyncio.run(_handle_slash_command(request, db, payload, "/user"))
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["status"], "success")
+        self.assertIn("Asha", result["reply"])
+
+    def test_admin_stats_command_accepts_configured_admin_phone(self) -> None:
+        class DummyUsers:
+            async def find_one(self, query: dict[str, object], *args: object, **kwargs: object) -> dict[str, object] | None:
+                return None
+
+            async def count_documents(self, *args: object, **kwargs: object) -> int:
+                return 3
+
+        db = SimpleNamespace(users=DummyUsers())
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+        payload = WhatsAppMessagePayload(
+            platform_id="admin-1",
+            phone_number="918660108587",
+            chat_id="chat-admin",
+            message="/admin stats",
+            timestamp=123,
+        )
+
+        result = asyncio.run(_handle_slash_command(request, db, payload, "/admin stats"))
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["status"], "success")
+        self.assertIn("Admin stats", result["reply"])
+
+    def test_register_command_persists_whatsapp_user_profile(self) -> None:
+        class DummyCollection:
+            def __init__(self) -> None:
+                self.saved: dict[str, object] | None = None
+
+            async def find_one(self, query: dict[str, object], *args: object, **kwargs: object) -> dict[str, object] | None:
+                return None
+
+            async def insert_one(self, doc: dict[str, object]) -> object:
+                self.saved = doc
+                return SimpleNamespace(inserted_id="abc123")
+
+        db = SimpleNamespace(users=DummyCollection())
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+        payload = WhatsAppMessagePayload(
+            platform_id="wa-123",
+            phone_number="919999999999",
+            chat_id="chat-whatsapp",
+            sender_name="Asha",
+            message="/register Asha",
+            timestamp=123,
+        )
+
+        result = asyncio.run(_handle_slash_command(request, db, payload, "/register Asha"))
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["status"], "success")
+        self.assertIn("Registration complete", result["reply"])
+        self.assertEqual(db.users.saved["platform_id"], "wa-123")
+        self.assertEqual(db.users.saved["phone"], "919999999999")
 
 
 if __name__ == "__main__":

@@ -1,9 +1,11 @@
 import logging
 import time
 import warnings
+from datetime import datetime
 from typing import Any, Optional
 
 from functools import lru_cache
+from zoneinfo import ZoneInfo
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -108,6 +110,20 @@ def _cached_persona() -> str:
     return BOT_PERSONA
 
 
+def build_runtime_system_prompt() -> str:
+    """Return the live persona prompt with the current date, day, and time rendered in."""
+    now = datetime.now(ZoneInfo("Asia/Kolkata"))
+    rendered = _cached_persona()
+    replacements = {
+        "{{CURRENT_DATE}}": now.strftime("%A, %d %B %Y"),
+        "{{CURRENT_DAY}}": now.strftime("%A"),
+        "{{CURRENT_TIME}}": now.strftime("%I:%M %p"),
+    }
+    for old, new_value in replacements.items():
+        rendered = rendered.replace(old, new_value)
+    return rendered
+
+
 @lru_cache(maxsize=8)
 def _compressed_history(history_key: str) -> list[dict[str, Any]]:
     return []
@@ -155,7 +171,7 @@ async def generate_chat_response(user_message: str, chat_history: Optional[list]
         compact_history = _compress_history(history=chat_history or [], limit=12)
         return await router.generate(
             user_message,
-            system_instruction=_cached_persona(),
+            system_instruction=build_runtime_system_prompt(),
             history=compact_history,
         )
     except Exception as exc:
