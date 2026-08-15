@@ -2,7 +2,7 @@ import asyncio
 import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from backend.ai.chat import build_runtime_system_prompt
 from backend.routes.whatsapp import _handle_slash_command, WhatsAppMessagePayload
@@ -11,6 +11,7 @@ from backend.services.gemini_service import GeminiService
 from backend.services.openrouter_service import OpenRouterService
 import backend.services.http_client as http_client
 
+from backend.routes.whatsapp import receive_whatsapp_message
 from backend.services.commands import extract_command
 from backend.services.gemini_service import GeminiService
 from backend.services.nezuko import sanitize_text, should_trigger_nezuko, build_help_text, is_authorized_admin
@@ -186,6 +187,33 @@ class NezukoServiceTests(unittest.TestCase):
         self.assertIn("Registration complete", result["reply"])
         self.assertEqual(db.users.saved["platform_id"], "wa-123")
         self.assertEqual(db.users.saved["phone"], "919999999999")
+
+    def test_receive_whatsapp_message_uses_decision_result(self) -> None:
+        class DummyUsers:
+            async def update_one(self, *args: object, **kwargs: object) -> None:
+                return None
+
+        db = SimpleNamespace(
+            users=DummyUsers(),
+            groups=SimpleNamespace(update_one=AsyncMock()),
+            blocked_users=SimpleNamespace(find_one=AsyncMock(return_value=None)),
+            blocked_groups=SimpleNamespace(find_one=AsyncMock(return_value=None)),
+            chat_settings=SimpleNamespace(find_one=AsyncMock(return_value={"reply_mode": "Always", "ai_on": True})),
+        )
+        payload = WhatsAppMessagePayload(
+            platform_id="whatsapp",
+            phone_number="919999999999",
+            chat_id="chat-1",
+            message="nezuko hello",
+            timestamp=123,
+        )
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(http_client=None, weather_api_key="")))
+
+        with patch("backend.routes.whatsapp.decide", new=AsyncMock(return_value={"allowed": True, "ai_enabled": True, "reason": "trigger", "trigger_detected": True, "reply_mode": "Always"})), patch("backend.routes.whatsapp.handle_nezuko_command", new=AsyncMock(return_value={"status": "success", "reply": "hi there"})):
+            result = asyncio.run(receive_whatsapp_message(request, payload, db))
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["reply"], "hi there")
 
 
 if __name__ == "__main__":

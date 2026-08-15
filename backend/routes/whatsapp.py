@@ -315,7 +315,8 @@ def _is_status_or_broadcast(payload: WhatsAppMessagePayload) -> Tuple[bool, Opti
 
 async def _fetch_one(db, collection: str, query: dict, projection: Optional[dict] = None) -> Optional[dict]:
     try:
-        return await db[collection].find_one(query, projection=projection)
+        col = _collection(db, collection)
+        return await col.find_one(query, projection=projection)
     except Exception:
         logger.exception("Mongo read failed collection=%s query=%s", collection, query)
         return None
@@ -349,7 +350,8 @@ async def _ensure_user(db, payload: WhatsAppMessagePayload, now_ts: int, text: s
         "$inc": {"message_count": 1},
     }
 
-    await db["users"].update_one(query, user_update, upsert=True)
+    users = _collection(db, "users")
+    await users.update_one(query, user_update, upsert=True)
 
 
 async def _ensure_group(db, payload: WhatsAppMessagePayload, now_ts: int) -> None:
@@ -371,7 +373,8 @@ async def _ensure_group(db, payload: WhatsAppMessagePayload, now_ts: int) -> Non
         },
     }
 
-    await db["groups"].update_one({"group_id": payload.group_id}, group_update, upsert=True)
+    groups = _collection(db, "groups")
+    await groups.update_one({"group_id": payload.group_id}, group_update, upsert=True)
 
 
 async def _check_blocked(db, payload: WhatsAppMessagePayload, is_group: bool) -> Optional[str]:
@@ -472,11 +475,13 @@ async def receive_whatsapp_message(request: Request, payload: WhatsAppMessagePay
         step_started = time.perf_counter()
         user_task = asyncio.create_task(_ensure_user(db, payload, now_ts, text))
         group_task = asyncio.create_task(_ensure_group(db, payload, now_ts)) if is_group else None
+        decision_start = time.perf_counter()
         decision_task = asyncio.create_task(decide(db, payload))
-        await asyncio.gather(user_task, decision_task, *( [group_task] if group_task else [] ))
+        await asyncio.gather(user_task, *( [group_task] if group_task else [] ))
+        decision = await decision_task
         logger.info("[WA][TIMING] mongo_user_upsert_ms=%d", int((time.perf_counter() - step_started) * 1000))
         logger.info("[WA][TIMING] memory_lookup_ms=%d", int((time.perf_counter() - started_at) * 1000))
-        logger.info("[WA][TIMING] decision_ms=%d", int((time.perf_counter() - started_at) * 1000))
+        logger.info("[WA][TIMING] decision_ms=%d", int((time.perf_counter() - decision_start) * 1000))
 
         if not decision.get("allowed"):
             logger.info("[WA][TIMING] decision_blocked_ms=%d", int((time.perf_counter() - started_at) * 1000))
