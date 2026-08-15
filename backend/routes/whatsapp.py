@@ -2,6 +2,8 @@ import logging
 import time
 from typing import Any, Dict, Optional, Tuple
 
+import asyncio
+
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -357,6 +359,7 @@ async def receive_whatsapp_message(request: Request, payload: WhatsAppMessagePay
         step_started = time.perf_counter()
         text = _message_text(payload)
         logger.info("[WA][TIMING] validation_ms=%d", int((time.perf_counter() - step_started) * 1000))
+        logger.info("[WA][TIMING] receive_ms=%d", int((time.perf_counter() - started_at) * 1000))
 
         if payload.message and len(payload.message) > MAX_MESSAGE_LENGTH_FALLBACK:
             payload.message = payload.message[:MAX_MESSAGE_LENGTH_FALLBACK]
@@ -380,17 +383,13 @@ async def receive_whatsapp_message(request: Request, payload: WhatsAppMessagePay
         is_group = payload.is_group and bool(payload.group_id)
 
         step_started = time.perf_counter()
-        await _ensure_user(db, payload, now_ts, text)
+        user_task = asyncio.create_task(_ensure_user(db, payload, now_ts, text))
+        group_task = asyncio.create_task(_ensure_group(db, payload, now_ts)) if is_group else None
+        decision_task = asyncio.create_task(decide(db, payload))
+        await asyncio.gather(user_task, decision_task, *( [group_task] if group_task else [] ))
         logger.info("[WA][TIMING] mongo_user_upsert_ms=%d", int((time.perf_counter() - step_started) * 1000))
-
-        if is_group:
-            step_started = time.perf_counter()
-            await _ensure_group(db, payload, now_ts)
-            logger.info("[WA][TIMING] mongo_group_upsert_ms=%d", int((time.perf_counter() - step_started) * 1000))
-
-        step_started = time.perf_counter()
-        decision = await decide(db, payload)
-        logger.info("[WA][TIMING] mongo_decision_ms=%d", int((time.perf_counter() - step_started) * 1000))
+        logger.info("[WA][TIMING] memory_lookup_ms=%d", int((time.perf_counter() - started_at) * 1000))
+        logger.info("[WA][TIMING] decision_ms=%d", int((time.perf_counter() - started_at) * 1000))
 
         if not decision.get("allowed"):
             logger.info("[WA][TIMING] decision_blocked_ms=%d", int((time.perf_counter() - started_at) * 1000))
@@ -411,7 +410,9 @@ async def receive_whatsapp_message(request: Request, payload: WhatsAppMessagePay
         step_started = time.perf_counter()
         reply = await generate_chat_response(text, [])
         reply = (str(reply) if reply is not None else "").strip()[:4000]
-        logger.info("[WA][TIMING] gemini_ms=%d", int((time.perf_counter() - step_started) * 1000))
+        logger.info("[WA][TIMING] prompt_ms=%d", int((time.perf_counter() - step_started) * 1000))
+        logger.info("[WA][TIMING] ai_total_ms=%d", int((time.perf_counter() - started_at) * 1000))
+        logger.info("[WA][TIMING] response_format_ms=%d", int((time.perf_counter() - started_at) * 1000))
         logger.info("[WA][TIMING] total_ms=%d", int((time.perf_counter() - started_at) * 1000))
 
         return {"status": "success", "reply": reply}

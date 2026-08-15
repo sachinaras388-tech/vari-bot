@@ -2,6 +2,7 @@ import logging
 import re
 import time
 from datetime import datetime, timezone
+from functools import lru_cache
 from typing import Any
 
 from backend.ai.chat import normalize_history_for_gemini
@@ -12,6 +13,15 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 WAKE_WORD = getattr(settings, "NEZUKO_WAKE_WORD", "nezuko") or "nezuko"
+
+
+@lru_cache(maxsize=128)
+def _cached_setting_value(key: str, value: str) -> str:
+    return value
+
+
+def get_cached_setting(key: str, default: str = "") -> str:
+    return _cached_setting_value(key, getattr(settings, key, default) or default)
 
 
 def sanitize_text(text: str | None) -> str:

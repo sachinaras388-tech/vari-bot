@@ -1,6 +1,9 @@
 import logging
+import time
 import warnings
 from typing import Any, Optional
+
+from functools import lru_cache
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -126,6 +129,39 @@ def normalize_history_for_gemini(chat_history: Optional[list] = None) -> list[di
 _router: Optional[AIRouter] = None
 
 
+@lru_cache(maxsize=1)
+def _cached_persona() -> str:
+    return BOT_PERSONA
+
+
+@lru_cache(maxsize=8)
+def _compressed_history(history_key: str) -> list[dict[str, Any]]:
+    return []
+
+
+def _compress_history(history: Optional[list[dict[str, Any]]] = None, limit: int = 12) -> list[dict[str, Any]]:
+    if not history:
+        return []
+
+    if len(history) <= limit:
+        return history[-limit:]
+
+    compressed: list[dict[str, Any]] = []
+    for item in history[-limit:]:
+        role = str(item.get("role") or "user").lower()
+        parts = item.get("parts") or item.get("content") or []
+        if isinstance(parts, str):
+            text = parts
+        elif isinstance(parts, list):
+            text = " ".join(str(part) for part in parts if str(part).strip())
+        else:
+            text = str(parts)
+        if not text:
+            continue
+        compressed.append({"role": role, "parts": [str(text)[:400]]})
+    return compressed
+
+
 def _get_router() -> AIRouter:
     global _router
     if _router is None:
@@ -142,10 +178,11 @@ async def generate_chat_response(user_message: str, chat_history: Optional[list]
     """Generate a response using the primary/secondary AI routing flow."""
     router = _get_router()
     try:
+        compact_history = _compress_history(history=chat_history or [], limit=12)
         return await router.generate(
             user_message,
-            system_instruction=BOT_PERSONA,
-            history=chat_history,
+            system_instruction=_cached_persona(),
+            history=compact_history,
         )
     except Exception as exc:
         logger.warning("[Router] Unexpected failure: %s", exc)

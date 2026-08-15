@@ -4,11 +4,11 @@ import os
 import time
 from typing import Any, Optional
 
-import httpx
 from google import genai as google_genai
 from google.genai import types as genai_types
 
 from backend.config.settings import get_settings
+from backend.services.http_client import get_shared_http_client
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +46,8 @@ class GeminiService:
 
         client = self._get_client()
         contents = self._build_contents(prompt, history)
+        client_http = get_shared_http_client()
+        _ = client_http
         config = genai_types.GenerateContentConfig(
             system_instruction=system_instruction,
             temperature=0.7,

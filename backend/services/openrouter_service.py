@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import os
 import time
@@ -7,6 +6,7 @@ from typing import Any, Optional
 import httpx
 
 from backend.config.settings import get_settings
+from backend.services.http_client import get_shared_http_client
 
 logger = logging.getLogger(__name__)
 
@@ -45,26 +45,27 @@ class OpenRouterService:
         started_at = time.perf_counter()
         logger.info("[OpenRouter] Request started model=%s history_len=%d", self.model, len(history or []))
 
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                self.base_url,
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "HTTP-Referer": "https://localhost",
-                    "X-Title": "Nezuko WhatsApp Bot",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-            )
+        client = get_shared_http_client()
+        response = await client.post(
+            self.base_url,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "HTTP-Referer": "https://localhost",
+                "X-Title": "Nezuko WhatsApp Bot",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=timeout,
+        )
 
-            response.raise_for_status()
-            data = response.json()
-            text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-            if not text:
-                raise RuntimeError("empty_openrouter_response")
+        response.raise_for_status()
+        data = response.json()
+        text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        if not text:
+            raise RuntimeError("empty_openrouter_response")
 
-            logger.info("[OpenRouter] Success elapsed_ms=%d", int((time.perf_counter() - started_at) * 1000))
-            return str(text).strip()
+        logger.info("[OpenRouter] Success elapsed_ms=%d", int((time.perf_counter() - started_at) * 1000))
+        return str(text).strip()
 
     def _build_messages(self, prompt: str, system_instruction: str, history: Optional[list[dict[str, Any]]]) -> list[dict[str, str]]:
         messages: list[dict[str, str]] = []

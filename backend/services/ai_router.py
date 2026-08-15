@@ -33,13 +33,17 @@ class AIRouter:
         for attempt in retries:
             try:
                 logger.info("[Gemini] Attempt %d", attempt)
-                return await self.gemini.generate(prompt, system_instruction=system_instruction, history=history, timeout=15.0)
+                return await self.gemini.generate(prompt, system_instruction=system_instruction, history=history, timeout=10.0)
             except Exception as exc:
-                if self._is_retryable_failure(exc):
-                    logger.warning("[Gemini] Retry %d after transient failure", attempt)
-                    await asyncio.sleep(1 if attempt == 1 else 2)
-                    continue
-                break
+                if not self._is_retryable_failure(exc):
+                    logger.warning("[Gemini] Non-retryable failure: %s", exc)
+                    break
+
+                logger.warning("[Gemini] Retry %d after transient failure", attempt)
+                if attempt == 2:
+                    break
+                await asyncio.sleep(0.5)
+                continue
 
         logger.warning("[Router] Switching to OpenRouter")
         return await self._generate_with_openrouter(prompt, system_instruction=system_instruction, history=history)
@@ -55,17 +59,10 @@ class AIRouter:
 
     def _is_retryable_failure(self, exc: Exception) -> bool:
         message = str(exc).lower()
-        retryable_markers = [
-            "429",
-            "rate limit",
-            "quota",
-            "resource_exhausted",
-            "timeout",
-            "temporarily",
-            "server",
-            "overloaded",
-            "connection",
-            "econnreset",
-            "eai_again",
-        ]
-        return any(marker in message for marker in retryable_markers)
+        if any(marker in message for marker in ["429", "rate limit", "quota", "resource_exhausted"]):
+            return False
+
+        if any(marker in message for marker in ["timeout", "temporarily", "server", "overloaded", "connection", "econnreset", "eai_again", "5xx", "503", "502", "500"]):
+            return True
+
+        return False

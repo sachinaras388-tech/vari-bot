@@ -1,10 +1,13 @@
+import asyncio
 import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from backend.services.ai_router import AIRouter
 from backend.services.gemini_service import GeminiService
 from backend.services.openrouter_service import OpenRouterService
+import backend.services.http_client as http_client
 
 from backend.services.commands import extract_command
 from backend.services.gemini_service import GeminiService
@@ -67,6 +70,30 @@ class NezukoServiceTests(unittest.TestCase):
         with patch("backend.services.openrouter_service.get_settings", return_value=SimpleNamespace(OPENROUTER_API_KEY="or-key", AI_API_KEY=None)):
             service = OpenRouterService()
             self.assertEqual(service.api_key, "or-key")
+
+    def test_shared_http_client_falls_back_when_http2_is_unavailable(self) -> None:
+        asyncio.run(http_client.close_shared_http_client())
+
+        class DummyClient:
+            async def aclose(self) -> None:
+                return None
+
+        def fake_client(*args: object, **kwargs: object) -> object:
+            if kwargs.get("http2"):
+                raise RuntimeError("h2 support unavailable")
+            return DummyClient()
+
+        with patch("backend.services.http_client.httpx.AsyncClient", side_effect=fake_client):
+            client = http_client.get_shared_http_client()
+
+        self.assertIsInstance(client, DummyClient)
+        asyncio.run(http_client.close_shared_http_client())
+
+    def test_ai_router_does_not_retry_quota_errors(self) -> None:
+        router = AIRouter()
+        self.assertFalse(router._is_retryable_failure(RuntimeError("HTTP 429: rate limit exceeded")))
+        self.assertFalse(router._is_retryable_failure(RuntimeError("RESOURCE_EXHAUSTED")))
+        self.assertTrue(router._is_retryable_failure(RuntimeError("HTTP 503: temporary server error")))
 
 
 if __name__ == "__main__":

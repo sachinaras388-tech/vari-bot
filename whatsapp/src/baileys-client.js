@@ -347,8 +347,9 @@ class BaileysClient {
       logger.info({ chatId: normalized.chat_id, responseStatus: response?.status }, 'Received FastAPI response for Baileys inbound message');
 
       if (response?.status === 'success' && typeof response.reply === 'string' && response.reply.trim()) {
-        await this.sendText(normalized.chat_id, response.reply);
-        return { status: 'success', reply: response.reply };
+        const replyText = response.reply.trim();
+        await this.sendText(normalized.chat_id, replyText);
+        return { status: 'success', reply: replyText };
       }
 
       logger.warn({ chatId: normalized.chat_id, reason: response?.reason || 'no_reply' }, 'FastAPI did not return a usable reply for Baileys message');

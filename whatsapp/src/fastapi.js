@@ -15,6 +15,8 @@ class FastApiClient {
       timeout: this.timeoutMs,
       maxRedirects: 3,
       headers: { 'Content-Type': 'application/json' },
+      httpAgent: new (require('http').Agent)({ keepAlive: true, maxSockets: 50 }),
+      httpsAgent: new (require('https').Agent)({ keepAlive: true, maxSockets: 50 }),
     });
   }
 

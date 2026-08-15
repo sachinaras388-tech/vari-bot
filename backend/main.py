@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.config.settings import get_settings
 from backend.database.connection import close_mongo_connection, connect_to_mongo
+from backend.services.http_client import close_shared_http_client
 from backend.routes.chat import router as chat_router
 from backend.routes.users import router as users_router
 from backend.routes.whatsapp import router as whatsapp_router
@@ -52,6 +53,7 @@ async def lifespan(app: FastAPI):
     if http_client is not None:
         await http_client.aclose()
 
+    await close_shared_http_client()
     await close_mongo_connection()
 
 
