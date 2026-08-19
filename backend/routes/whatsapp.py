@@ -134,7 +134,7 @@ async def _handle_slash_command(request: Request, db, payload: WhatsAppMessagePa
     if lowered.startswith("/dw"):
         parts = command.split(maxsplit=1)
         if len(parts) < 2 or not parts[1].strip():
-            return {"status": "error", "reply": "❌ Baka! Send a video URL 😭"}
+            return {"status": "error", "reply": "❌ Baka! Send a video URL after /dw 😭"}
 
         url = parts[1].strip()
         # basic URL validation

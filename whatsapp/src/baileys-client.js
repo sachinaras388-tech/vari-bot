@@ -247,6 +247,25 @@ class BaileysClient {
         return;
       }
 
+      // Special commands that should bypass the group mention requirement (e.g. /dw)
+      const _msgText = String(normalized.message || '').trim();
+      const _lowerMsg = _msgText.toLowerCase();
+      if (_lowerMsg === '/dw' || _lowerMsg.startsWith('/dw ')) {
+        // Minimal DW logging; avoid logging full message text to reduce sensitive data exposure
+        logger.info({ chatId: normalized.chat_id }, '[DW] Download command detected');
+        const _url = _msgText.length > 3 ? _msgText.slice(3).trim() : '';
+        if (_url) {
+          logger.info({ chatId: normalized.chat_id, url: _url }, '[DW] URL detected');
+        }
+        try {
+          const response = await this.handleIncomingWebhook?.(normalized);
+          logger.info({ chatId: normalized.chat_id, responseStatus: response?.status }, '[DW] forwarded to backend');
+        } catch (error) {
+          logger.error({ err: error?.message || error, chatId: normalized.chat_id }, '[DW] forwarding failed');
+        }
+        return;
+      }
+
       if (!/nezuko/i.test(normalized.message || '') && !/nezuko/i.test(String(normalized.quoted_text || ''))) {
         logger.info({ from: normalized.phone_number, chatId: normalized.chat_id, messageText: normalized.message }, 'Baileys message ignored because it did not mention Nezuko');
         return;
