@@ -12,6 +12,11 @@ from backend.ai.chat import generate_chat_response
 from backend.database.connection import get_db
 from backend.services.commands import handle_nezuko_command
 from backend.services.nezuko import is_authorized_admin, should_trigger_nezuko, sanitize_text
+from backend.services import download_manager
+from fastapi.responses import FileResponse
+import httpx
+import os
+import shutil
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +129,70 @@ def _is_command(text: str) -> bool:
 async def _handle_slash_command(request: Request, db, payload: WhatsAppMessagePayload, text: str) -> Optional[dict]:
     command = text.strip()
     lowered = command.lower()
+
+    # /dw <url> - download media via yt-dlp and send back to WhatsApp
+    if lowered.startswith("/dw"):
+        parts = command.split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            return {"status": "error", "reply": "❌ Baka! Send a video URL 😭"}
+
+        url = parts[1].strip()
+        # basic URL validation
+        if not (url.startswith("http://") or url.startswith("https://")):
+            return {"status": "error", "reply": "❌ That doesn't look like a valid video URL 😭"}
+
+        # Acknowledge immediately and start background download
+        try:
+            http_client: httpx.AsyncClient = getattr(request.app.state, "http_client", None)
+        except Exception:
+            http_client = None
+
+        # spawn background task so we don't block the FastAPI request
+        async def _background():
+            logger.info("[DW] download_started url=%s chat_id=%s", url, payload.chat_id)
+            try:
+                download_id, filename = await download_manager.download_video(url)
+                # build public URL for the bridge to fetch
+                fastapi_base = os.environ.get("FASTAPI_URL", f"http://localhost:{request.url.port or 8000}")
+                file_url = f"{fastapi_base.rstrip('/')}/api/v1/whatsapp/downloads/{download_id}/{filename}"
+                logger.info("[DW] download_completed file=%s size=%s", filename, os.path.getsize(os.path.join(download_manager.DOWNLOADS_ROOT, download_id, filename)))
+
+                # notify whatsapp bridge to send the media
+                bridge_url = os.environ.get("WHATSAPP_BRIDGE_INTERNAL_URL", "http://localhost:10000/internal/send_media")
+                payload_json = {
+                    "to": payload.chat_id,
+                    "media_url": file_url,
+                    "media_type": "video",
+                    "filename": filename,
+                    "caption": "✅ Done! 🎬✨",
+                }
+                try:
+                    if http_client is None:
+                        async with httpx.AsyncClient(timeout=30.0) as client:
+                            await client.post(bridge_url, json=payload_json, timeout=30.0)
+                    else:
+                        await http_client.post(bridge_url, json=payload_json, timeout=30.0)
+                    logger.info("[DW] whatsapp_upload_requested to=%s file=%s", payload.chat_id, filename)
+                except Exception:
+                    logger.exception("[DW] whatsapp_upload_request_failed to=%s", payload.chat_id)
+            except download_manager.DownloadError as exc:
+                logger.exception("[DW] download_failed url=%s err=%s", url, exc)
+                # try to notify user of failure via bridge
+                try:
+                    bridge_url = os.environ.get("WHATSAPP_BRIDGE_INTERNAL_URL", "http://localhost:10000/internal/send_media")
+                    fail_payload = {"to": payload.chat_id, "text": "❌ I couldn't download that video. Try another link!"}
+                    if http_client is None:
+                        async with httpx.AsyncClient(timeout=10.0) as client:
+                            await client.post(bridge_url, json=fail_payload, timeout=10.0)
+                    else:
+                        await http_client.post(bridge_url, json=fail_payload, timeout=10.0)
+                except Exception:
+                    logger.exception("[DW] failed to notify user of download failure to=%s", payload.chat_id)
+            except Exception as exc:
+                logger.exception("[DW] unexpected_error url=%s err=%s", url, exc)
+
+        asyncio.create_task(_background())
+        return {"status": "success", "reply": "⏳ Nezuko is downloading your video... 🎬"}
 
     if lowered in {"/help", "help"}:
         return {
@@ -514,4 +583,29 @@ async def receive_whatsapp_message(request: Request, payload: WhatsAppMessagePay
     except Exception:
         logger.exception("WhatsApp message handling failed after_ms=%d", int((time.perf_counter() - started_at) * 1000))
         raise HTTPException(status_code=500, detail="WhatsApp integration error")
+
+
+
+@router.get("/downloads/{download_id}/{filename}")
+async def serve_download(download_id: str, filename: str):
+    root = download_manager.DOWNLOADS_ROOT
+    file_path = os.path.join(root, download_id, filename)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(file_path, media_type="video/mp4", filename=filename)
+
+
+@router.post("/downloads/{download_id}/complete")
+async def complete_download(download_id: str):
+    root = download_manager.DOWNLOADS_ROOT
+    dir_path = os.path.join(root, download_id)
+    if not os.path.exists(dir_path):
+        return {"status": "ok", "deleted": False}
+    try:
+        shutil.rmtree(dir_path)
+        logger.info("[DW] cleanup_completed download_id=%s", download_id)
+        return {"status": "ok", "deleted": True}
+    except Exception:
+        logger.exception("[DW] cleanup_failed download_id=%s", download_id)
+        raise HTTPException(status_code=500, detail="Cleanup failed")
 

@@ -139,6 +139,57 @@ app.post('/webhook/whatsapp', async (req, res) => {
   }
 });
 
+// Internal endpoint used by the backend to request outbound media/text sends
+app.post('/internal/send_media', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const to = body.to;
+    if (!to) {
+      return res.status(400).json({ status: 'error', message: 'missing to' });
+    }
+
+    if (body.text) {
+      await client.sendText(to, String(body.text));
+      return res.json({ status: 'ok' });
+    }
+
+    if (!body.media_url) {
+      return res.status(400).json({ status: 'error', message: 'missing media_url' });
+    }
+
+    const mediaType = body.media_type || 'video';
+    const filename = body.filename || null;
+    const caption = body.caption || '';
+    if (typeof client.sendMedia !== 'function') {
+      return res.status(500).json({ status: 'error', message: 'client does not support media send' });
+    }
+
+    await client.sendMedia(to, body.media_url, { mediaType, filename, caption });
+    // Attempt to notify backend to delete the temporary file (if present)
+    try {
+      const backendBase = (process.env.FASTAPI_URL || 'http://localhost:8000').replace(/\/$/, '');
+      const parsed = new URL(body.media_url);
+      const parts = parsed.pathname.split('/');
+      const downloadsIdx = parts.indexOf('downloads');
+      if (downloadsIdx >= 0 && parts.length > downloadsIdx + 1) {
+        const downloadId = parts[downloadsIdx + 1];
+        try {
+          await axios.post(`${backendBase}/api/v1/whatsapp/downloads/${downloadId}/complete`, {}, { timeout: 5000 });
+        } catch (err) {
+          logger.warn({ err: err?.message || err }, 'Failed to notify backend for cleanup');
+        }
+      }
+    } catch (err) {
+      logger.warn({ err: err?.message || err }, 'Failed to parse media_url for cleanup');
+    }
+
+    return res.json({ status: 'ok' });
+  } catch (error) {
+    logger.error({ err: error?.message || error, body: req.body }, 'Internal send_media failed');
+    return res.status(500).json({ status: 'error', message: 'send_media failed' });
+  }
+});
+
 app.post('/webhook/verify', (req, res) => {
   const mode = getEnv('WHATSAPP_WEBHOOK_VERIFY_MODE', 'subscribe');
   res.json({ status: 'ok', mode });

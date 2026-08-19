@@ -390,6 +390,31 @@ class BaileysClient {
     logger.info({ to, messageLength: text.length, messageId: result?.key?.id || null }, 'Outbound Baileys text sent successfully');
     return result;
   }
+
+  async sendMedia(to, mediaUrl, opts = {}) {
+    if (!this.sock || !this.ready) {
+      throw new Error('Baileys client is not ready');
+    }
+    const mediaType = (opts.mediaType || 'video').toLowerCase();
+    const caption = opts.caption || '';
+    logger.info({ to, mediaUrl, mediaType }, 'Sending outbound Baileys media');
+    const message = {};
+    if (mediaType === 'video') {
+      message.video = { url: mediaUrl };
+      if (caption) message.caption = caption;
+    } else if (mediaType === 'image' || mediaType === 'photo') {
+      message.image = { url: mediaUrl };
+      if (caption) message.caption = caption;
+    } else {
+      // fallback to document
+      message.document = { url: mediaUrl, mimetype: 'application/octet-stream', fileName: opts.filename || 'file' };
+      if (caption) message.caption = caption;
+    }
+
+    const result = await this.sock.sendMessage(to, message);
+    logger.info({ to, mediaType, messageId: result?.key?.id || null }, 'Outbound Baileys media sent successfully');
+    return result;
+  }
 }
 
 module.exports = BaileysClient;

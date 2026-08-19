@@ -10,6 +10,7 @@ const {
   shouldProcessMessage,
   getBackoffDelay,
 } = require('./bridge-utils');
+const FormData = require('form-data');
 
 class WhatsAppBridge extends EventEmitter {
   constructor() {
@@ -290,6 +291,54 @@ class WhatsAppBridge extends EventEmitter {
     } catch (error) {
       logger.error({ to, err: error?.message || error }, 'Failed to send outbound WhatsApp text');
       throw error;
+    }
+  }
+
+  async sendMedia(to, mediaUrl, opts = {}) {
+    if (!this.configReady) {
+      throw new Error('WhatsApp Cloud API is not configured');
+    }
+    const targetId = this.phoneNumberId || this.businessAccountId;
+    const filename = opts.filename || 'video.mp4';
+    const caption = opts.caption || '';
+
+    // Fetch the remote file as a stream
+    let resp;
+    try {
+      resp = await this.httpClient.get(mediaUrl, { responseType: 'stream', timeout: 30000 });
+    } catch (err) {
+      logger.error({ err: err?.message || err, mediaUrl }, 'Failed to fetch remote media');
+      throw err;
+    }
+
+    // Upload media to WhatsApp Cloud API
+    try {
+      const form = new FormData();
+      form.append('messaging_product', 'whatsapp');
+      form.append('file', resp.data, { filename });
+
+      const uploadUrl = `${this.baseUrl}/${targetId}/media`;
+      const headers = Object.assign({ Authorization: `Bearer ${this.accessToken}` }, form.getHeaders());
+      const uploadResp = await this.httpClient.post(uploadUrl, form, { headers, timeout: 60000, maxBodyLength: Infinity });
+      const mediaId = uploadResp?.data?.id;
+      if (!mediaId) {
+        throw new Error('Media upload failed: no id returned');
+      }
+
+      // Send message referencing uploaded media id
+      const sendUrl = `${this.baseUrl}/${targetId}/messages`;
+      const body = {
+        messaging_product: 'whatsapp',
+        to,
+        type: 'video',
+        video: { id: mediaId, caption },
+      };
+      await this.httpClient.post(sendUrl, body, { headers: { Authorization: `Bearer ${this.accessToken}` }, timeout: 60000 });
+      logger.info({ to, mediaId }, 'WhatsApp cloud media message sent');
+      return { status: 'success', mediaId };
+    } catch (err) {
+      logger.error({ err: err?.message || err }, 'Failed to upload/send media via WhatsApp Cloud API');
+      throw err;
     }
   }
 
