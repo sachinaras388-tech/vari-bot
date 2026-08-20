@@ -140,7 +140,8 @@ class WhatsAppBridge extends EventEmitter {
     }
 
     const messageBody = normalized.message || '';
-    const wakeWordDetected = /nezuko/i.test(messageBody) || /nezuko/i.test(String(normalized.quoted_text || ''));
+    const specialCommand = /^(\/dw|\/tts|\/vc|\/voice)(\s|$)/i.test(messageBody.trim());
+    const wakeWordDetected = specialCommand || /nezuko/i.test(messageBody) || /nezuko/i.test(String(normalized.quoted_text || ''));
     logger.info(
       {
         from: normalized.phone_number,
@@ -299,7 +300,8 @@ class WhatsAppBridge extends EventEmitter {
       throw new Error('WhatsApp Cloud API is not configured');
     }
     const targetId = this.phoneNumberId || this.businessAccountId;
-    const filename = opts.filename || 'video.mp4';
+    const mediaType = (opts.mediaType || 'video').toLowerCase();
+    const filename = opts.filename || (mediaType === 'audio' ? 'voice.mp3' : 'video.mp4');
     const caption = opts.caption || '';
 
     // Fetch the remote file as a stream
@@ -330,8 +332,8 @@ class WhatsAppBridge extends EventEmitter {
       const body = {
         messaging_product: 'whatsapp',
         to,
-        type: 'video',
-        video: { id: mediaId, caption },
+        type: mediaType === 'audio' ? 'audio' : 'video',
+        ...(mediaType === 'audio' ? { audio: { id: mediaId } } : { video: { id: mediaId, caption } }),
       };
       await this.httpClient.post(sendUrl, body, { headers: { Authorization: `Bearer ${this.accessToken}` }, timeout: 60000 });
       logger.info({ to, mediaId }, 'WhatsApp cloud media message sent');

@@ -247,14 +247,14 @@ class BaileysClient {
         return;
       }
 
-      // Special commands that should bypass the group mention requirement (e.g. /dw)
+      // Special commands should bypass the group mention requirement.
       const _msgText = String(normalized.message || '').trim();
       const _lowerMsg = _msgText.toLowerCase();
-      if (_lowerMsg === '/dw' || _lowerMsg.startsWith('/dw ')) {
+      if (/^(\/dw|\/tts|\/vc|\/voice)(\s|$)/i.test(_msgText)) {
         // Minimal DW logging; avoid logging full message text to reduce sensitive data exposure
         logger.info({ chatId: normalized.chat_id }, '[DW] Download command detected');
         const _url = _msgText.length > 3 ? _msgText.slice(3).trim() : '';
-        if (_url) {
+        if (_lowerMsg.startsWith('/dw ') && _url) {
           logger.info({ chatId: normalized.chat_id, url: _url }, '[DW] URL detected');
         }
         try {
@@ -421,6 +421,9 @@ class BaileysClient {
     if (mediaType === 'video') {
       message.video = { url: mediaUrl };
       if (caption) message.caption = caption;
+    } else if (mediaType === 'audio') {
+      message.audio = { url: mediaUrl, mimetype: 'audio/mpeg' };
+      message.ptt = Boolean(opts.ptt);
     } else if (mediaType === 'image' || mediaType === 'photo') {
       message.image = { url: mediaUrl };
       if (caption) message.caption = caption;

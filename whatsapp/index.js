@@ -1,4 +1,5 @@
 const express = require('express');
+const axios = require('axios');
 const { getEnv, getIntEnv, getBoolEnv } = require('./src/config');
 const logger = require('./src/logger');
 const WhatsAppClient = require('./src/whatsapp-client');
@@ -177,6 +178,15 @@ app.post('/internal/send_media', async (req, res) => {
           await axios.post(`${backendBase}/api/v1/whatsapp/downloads/${downloadId}/complete`, {}, { timeout: 5000 });
         } catch (err) {
           logger.warn({ err: err?.message || err }, 'Failed to notify backend for cleanup');
+        }
+      }
+      const ttsIdx = parts.indexOf('tts');
+      if (ttsIdx >= 0 && parts.length > ttsIdx + 1) {
+        const filename = parts[ttsIdx + 1];
+        try {
+          await axios.post(`${backendBase}/api/v1/whatsapp/tts/${encodeURIComponent(filename)}/complete`, {}, { timeout: 5000 });
+        } catch (err) {
+          logger.warn({ err: err?.message || err }, 'Failed to notify backend for TTS cleanup');
         }
       }
     } catch (err) {

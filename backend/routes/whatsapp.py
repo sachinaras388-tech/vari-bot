@@ -13,6 +13,7 @@ from backend.database.connection import get_db
 from backend.services.commands import handle_nezuko_command
 from backend.services.nezuko import is_authorized_admin, should_trigger_nezuko, sanitize_text
 from backend.services import download_manager
+from backend.services import tts_service
 from fastapi.responses import FileResponse
 import httpx
 import os
@@ -23,6 +24,16 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/whatsapp", tags=["WhatsApp Integration"])
 
 MAX_MESSAGE_LENGTH_FALLBACK = 4000
+
+TTS_USAGE = "🎙️ Usage:\n\n/tts <language> <text>\n\nExample:\n/tts kn ನಮಸ್ಕಾರ!\n/tts hi नमस्ते!\n/tts en Hello!"
+TTS_LANGUAGES = "\n".join(f"{code} — {name}" for code, name in tts_service.LANGUAGES.items())
+TTS_HELP = (
+    "🎙️ Nezuko TTS\n\nConvert text into voice/audio.\n\nUsage:\n\n"
+    "/tts <language> <text>\n\nLanguages:\n\n"
+    f"{TTS_LANGUAGES}\n\nExamples:\n\n"
+    "/tts kn ನಮಸ್ಕಾರ! ಹೇಗಿದ್ದೀರಾ?\n\n/tts hi नमस्ते! कैसे हो?\n\n"
+    "/tts en Hello! How are you?\n\n🎧 Send it and I'll turn it into audio!"
+)
 
 
 def _normalize_phone_number(value: Optional[str]) -> str:
@@ -126,9 +137,74 @@ def _is_command(text: str) -> bool:
     return text.startswith("/")
 
 
+async def _notify_tts_failure(http_client, chat_id: str, text: str) -> None:
+    bridge_url = os.environ.get("WHATSAPP_BRIDGE_INTERNAL_URL", "http://localhost:10000/internal/send_media")
+    payload = {"to": chat_id, "text": text}
+    try:
+        if http_client is None:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                await client.post(bridge_url, json=payload, timeout=10.0)
+        else:
+            await http_client.post(bridge_url, json=payload, timeout=10.0)
+    except Exception:
+        logger.exception("[TTS] failure_notification_failed to=%s", chat_id)
+
+
 async def _handle_slash_command(request: Request, db, payload: WhatsAppMessagePayload, text: str) -> Optional[dict]:
     command = text.strip()
     lowered = command.lower()
+
+    tts_alias = next((alias for alias in ("/tts", "/vc", "/voice") if lowered == alias or lowered.startswith(f"{alias} ")), None)
+    if tts_alias:
+        parts = command.split(maxsplit=2)
+        if len(parts) == 1:
+            return {"status": "error", "reply": TTS_USAGE}
+        language = parts[1].lower()
+        if language == "help" and len(parts) == 2:
+            return {"status": "success", "reply": TTS_HELP}
+        if language not in tts_service.LANGUAGES:
+            return {"status": "error", "reply": f"❌ Unsupported language: {language}\n\nAvailable languages:\n\n{TTS_LANGUAGES}\n\nExample:\n\n/tts kn नमस्कार!"}
+        if len(parts) < 3 or not parts[2].strip():
+            return {"status": "error", "reply": "❌ Baka! Give me some text to convert into voice 😭"}
+        voice_text = parts[2].strip()
+        if len(voice_text) > tts_service.MAX_TTS_CHARS:
+            return {"status": "error", "reply": "❌ That's too much text for one voice message 😭\n\nPlease keep it under 3000 characters."}
+
+        try:
+            http_client = getattr(request.app.state, "http_client", None)
+        except Exception:
+            http_client = None
+
+        async def _background_tts():
+            audio_path = None
+            logger.info("[TTS] command_detected language=%s text_length=%d", language, len(voice_text))
+            try:
+                audio_path = await tts_service.text_to_speech(voice_text, language)
+                filename = os.path.basename(audio_path)
+                fastapi_base = os.environ.get("FASTAPI_URL", f"http://localhost:{request.url.port or 8000}")
+                file_url = f"{fastapi_base.rstrip('/')}/api/v1/whatsapp/tts/{filename}"
+                bridge_url = os.environ.get("WHATSAPP_BRIDGE_INTERNAL_URL", "http://localhost:10000/internal/send_media")
+                send_payload = {"to": payload.chat_id, "media_url": file_url, "media_type": "audio", "filename": filename, "caption": "🎧 Done!"}
+                logger.info("[TTS] whatsapp_upload_started to=%s", payload.chat_id)
+                if http_client is None:
+                    async with httpx.AsyncClient(timeout=60.0) as client:
+                        response = await client.post(bridge_url, json=send_payload, timeout=60.0)
+                else:
+                    response = await http_client.post(bridge_url, json=send_payload, timeout=60.0)
+                response.raise_for_status()
+                logger.info("[TTS] whatsapp_upload_completed to=%s", payload.chat_id)
+            except tts_service.TTSBusyError:
+                logger.warning("[TTS] busy to=%s", payload.chat_id)
+                await _notify_tts_failure(http_client, payload.chat_id, "⏳ Too many voice requests right now, Senpai!\n\nTry again in a moment 🎙️")
+            except Exception:
+                logger.exception("[TTS] request_failed to=%s", payload.chat_id)
+                await _notify_tts_failure(http_client, payload.chat_id, "❌ I couldn't create the voice right now, Senpai 😭\n\nPlease try again.")
+            finally:
+                if audio_path:
+                    tts_service.remove_audio(audio_path)
+
+        asyncio.create_task(_background_tts())
+        return {"status": "success", "reply": "⏳ Creating your voice... 🎙️✨"}
 
     # /dw <url> - download media via yt-dlp and send back to WhatsApp
     if lowered.startswith("/dw"):
@@ -593,6 +669,23 @@ async def serve_download(download_id: str, filename: str):
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(file_path, media_type="video/mp4", filename=filename)
+
+
+@router.get("/tts/{filename}")
+async def serve_tts_audio(filename: str):
+    file_path = tts_service.TTS_ROOT / filename
+    if file_path.parent != tts_service.TTS_ROOT or not file_path.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(file_path, media_type="audio/mpeg", filename=filename)
+
+
+@router.post("/tts/{filename}/complete")
+async def complete_tts_audio(filename: str):
+    file_path = tts_service.TTS_ROOT / filename
+    if file_path.parent != tts_service.TTS_ROOT:
+        raise HTTPException(status_code=404, detail="File not found")
+    tts_service.remove_audio(str(file_path))
+    return {"status": "ok", "deleted": not file_path.exists()}
 
 
 @router.post("/downloads/{download_id}/complete")
