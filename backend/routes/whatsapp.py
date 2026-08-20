@@ -676,6 +676,10 @@ async def serve_tts_audio(filename: str):
     file_path = tts_service.TTS_ROOT / filename
     if file_path.parent != tts_service.TTS_ROOT or not file_path.is_file():
         raise HTTPException(status_code=404, detail="File not found")
+    file_size = file_path.stat().st_size
+    logger.info("[TTS] serving_audio filename=%s", filename)
+    logger.info("[TTS] serving_audio size=%d", file_size)
+    logger.info("[TTS] serving_audio content_type=audio/mpeg")
     return FileResponse(file_path, media_type="audio/mpeg", filename=filename)
 
 

@@ -422,8 +422,9 @@ class BaileysClient {
       message.video = { url: mediaUrl };
       if (caption) message.caption = caption;
     } else if (mediaType === 'audio') {
-      message.audio = { url: mediaUrl, mimetype: 'audio/mpeg' };
-      message.ptt = Boolean(opts.ptt);
+      message.audio = { url: mediaUrl };
+      message.mimetype = 'audio/mpeg';
+      message.ptt = false;
     } else if (mediaType === 'image' || mediaType === 'photo') {
       message.image = { url: mediaUrl };
       if (caption) message.caption = caption;
