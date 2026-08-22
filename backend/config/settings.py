@@ -25,8 +25,8 @@ class Settings(BaseSettings):
     WEATHER_API_KEY: str = ""
     GEMINI_MODEL: str | None = None
 
-    # Nezuko Assistant
-    NEZUKO_WAKE_WORD: str = "nezuko"
+    # Myara Assistant
+    MYARA_WAKE_WORD: str = "myara"
     CONVERSATION_TTL_SECONDS: int = 60 * 60 * 24 * 7
     ADMIN_PHONE_NUMBERS: str = "918660108587"
     OWNER_NUMBER: str = "918660108587"

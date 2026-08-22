@@ -3,7 +3,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from datetime import datetime, timezone
 
 from backend.database.connection import db_instance
-from backend.services.nezuko import prune_expired_conversations
+from backend.services.myara import prune_expired_conversations
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +53,7 @@ async def daily_morning_routine():
 
 
 async def cleanup_conversations():
-    """Prune stale Nezuko memory documents so storage remains bounded."""
+    """Prune stale Myara memory documents so storage remains bounded."""
     if db_instance.db is None:
         return
     deleted = await prune_expired_conversations(db_instance.db)

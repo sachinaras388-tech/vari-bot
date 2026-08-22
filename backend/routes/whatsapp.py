@@ -10,8 +10,8 @@ from pydantic import BaseModel, Field
 
 from backend.ai.chat import generate_chat_response
 from backend.database.connection import get_db
-from backend.services.commands import handle_nezuko_command
-from backend.services.nezuko import is_authorized_admin, should_trigger_nezuko, sanitize_text
+from backend.services.commands import handle_myara_command
+from backend.services.myara import is_authorized_admin, should_trigger_myara, sanitize_text
 from backend.services import download_manager
 from backend.services import tts_service
 from fastapi.responses import FileResponse
@@ -28,7 +28,7 @@ MAX_MESSAGE_LENGTH_FALLBACK = 4000
 TTS_USAGE = "🎙️ Usage:\n\n/tts <language> <text>\n\nExample:\n/tts kn ನಮಸ್ಕಾರ!\n/tts hi नमस्ते!\n/tts en Hello!"
 TTS_LANGUAGES = "\n".join(f"{code} — {name}" for code, name in tts_service.LANGUAGES.items())
 TTS_HELP = (
-    "🎙️ Nezuko TTS\n\nConvert text into voice/audio.\n\nUsage:\n\n"
+    "🎙️ Myara TTS\n\nConvert text into voice/audio.\n\nUsage:\n\n"
     "/tts <language> <text>\n\nLanguages:\n\n"
     f"{TTS_LANGUAGES}\n\nExamples:\n\n"
     "/tts kn ನಮಸ್ಕಾರ! ಹೇಗಿದ್ದೀರಾ?\n\n/tts hi नमस्ते! कैसे हो?\n\n"
@@ -268,7 +268,7 @@ async def _handle_slash_command(request: Request, db, payload: WhatsAppMessagePa
                 logger.exception("[DW] unexpected_error url=%s err=%s", url, exc)
 
         asyncio.create_task(_background())
-        return {"status": "success", "reply": "⏳ Nezuko is downloading your video... 🎬"}
+        return {"status": "success", "reply": "⏳ Myara is downloading your video... 🎬"}
 
     if lowered in {"/help", "help"}:
         return {
@@ -606,8 +606,8 @@ async def receive_whatsapp_message(request: Request, payload: WhatsAppMessagePay
             return {"status": "ignored", "reason": sb_reason}
 
         lower = text.lower()
-        trigger_word = should_trigger_nezuko(text)
-        direct_reply = bool(payload.quoted_text) and should_trigger_nezuko(str(payload.quoted_text))
+        trigger_word = should_trigger_myara(text)
+        direct_reply = bool(payload.quoted_text) and should_trigger_myara(str(payload.quoted_text))
         command_trigger = _is_command(text)
         trigger_detected = trigger_word or direct_reply or command_trigger
         if not trigger_detected:
@@ -638,8 +638,8 @@ async def receive_whatsapp_message(request: Request, payload: WhatsAppMessagePay
                 logger.info("[WA][TIMING] command_ms=%d", int((time.perf_counter() - started_at) * 1000))
                 return {"status": "success", "reply": command_result["reply"]}
 
-        if should_trigger_nezuko(text) or bool(payload.quoted_text and should_trigger_nezuko(str(payload.quoted_text))):
-            command_result = await handle_nezuko_command(db, payload.model_dump(), text)
+        if should_trigger_myara(text) or bool(payload.quoted_text and should_trigger_myara(str(payload.quoted_text))):
+            command_result = await handle_myara_command(db, payload.model_dump(), text)
             if command_result.get("status") != "ignored":
                 logger.info("[WA][TIMING] command_ms=%d", int((time.perf_counter() - started_at) * 1000))
                 return {"status": "success", "reply": command_result["reply"]}

@@ -55,7 +55,7 @@ class AIRouter:
             return response
         except Exception as exc:
             logger.warning("[OpenRouter] Failed: %s", exc)
-            return "🌸 Nezuko is taking a tiny tea break, senpai! Please try again in a few moments. 💖"
+            return "🌸 Myara is taking a tiny tea break, senpai! Please try again in a few moments. 💖"
 
     def _is_retryable_failure(self, exc: Exception) -> bool:
         message = str(exc).lower()

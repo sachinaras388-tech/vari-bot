@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any
 
 from backend.ai.chat import generate_chat_response, normalize_history_for_gemini
-from backend.services.nezuko import (
+from backend.services.myara import (
     build_command_help,
     build_help_text,
     clear_conversation_history,
@@ -12,7 +12,7 @@ from backend.services.nezuko import (
     is_authorized_admin,
     save_conversation_history,
     sanitize_text,
-    should_trigger_nezuko,
+    should_trigger_myara,
 )
 
 
@@ -23,14 +23,14 @@ def extract_command(text: str) -> str:
         return ""
 
     lowered = cleaned.lower()
-    if lowered.startswith("nezuko"):
-        remainder = cleaned[6:].strip()
+    if lowered.startswith("myara"):
+        remainder = cleaned[5:].strip()
         return remainder if remainder else ""
 
-    if " nezuko " in lowered:
+    if " myara " in lowered:
         parts = cleaned.split()
         try:
-            idx = [i for i, token in enumerate(parts) if token.lower() == "nezuko"][0]
+            idx = [i for i, token in enumerate(parts) if token.lower() == "myara"][0]
         except IndexError:
             return cleaned
         return " ".join(parts[idx + 1 :]).strip()
@@ -40,20 +40,20 @@ def extract_command(text: str) -> str:
 logger = logging.getLogger(__name__)
 
 
-async def handle_nezuko_command(db: Any, payload: dict[str, Any], text: str) -> dict[str, Any]:
-    """Route a Nezuko-triggered message to the right command or generic AI flow."""
+async def handle_myara_command(db: Any, payload: dict[str, Any], text: str) -> dict[str, Any]:
+    """Route a Myara-triggered message to the right command or generic AI flow."""
     message_text = sanitize_text(text)
     command_text = extract_command(message_text)
     normalized = command_text.lower().strip()
 
-    if not should_trigger_nezuko(message_text):
+    if not should_trigger_myara(message_text):
         return {"status": "ignored", "reply": "", "reason": "no_trigger"}
 
     if normalized in {"help", "menu", "about"}:
         return {"status": "success", "reply": build_help_text()}
 
     if normalized in {"ping", "status"}:
-        return {"status": "success", "reply": "Nezuko is online and ready, senpai! 🌸"}
+        return {"status": "success", "reply": "Myara is online and ready, senpai! 🌸"}
 
     if normalized in {"reset memory", "clear chat"}:
         cleared = await clear_conversation_history(db, payload.get("chat_id", ""))

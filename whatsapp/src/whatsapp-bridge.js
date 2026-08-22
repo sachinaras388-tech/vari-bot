@@ -141,7 +141,7 @@ class WhatsAppBridge extends EventEmitter {
 
     const messageBody = normalized.message || '';
     const specialCommand = /^(\/dw|\/tts|\/vc|\/voice)(\s|$)/i.test(messageBody.trim());
-    const wakeWordDetected = specialCommand || /nezuko/i.test(messageBody) || /nezuko/i.test(String(normalized.quoted_text || ''));
+    const wakeWordDetected = specialCommand || /myara/i.test(messageBody) || /myara/i.test(String(normalized.quoted_text || ''));
     logger.info(
       {
         from: normalized.phone_number,

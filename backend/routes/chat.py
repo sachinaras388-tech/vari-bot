@@ -5,7 +5,7 @@ from typing import List, Optional
 
 from backend.ai.chat import generate_chat_response, normalize_history_for_gemini
 from backend.database.connection import get_db
-from backend.services.nezuko import get_conversation_history, save_conversation_history, sanitize_text
+from backend.services.myara import get_conversation_history, save_conversation_history, sanitize_text
 
 
 logger = logging.getLogger(__name__)

@@ -23,8 +23,8 @@
 - [x] Repo-wide search for `was never awaited` and misuse of `to_thread` with async functions.
 - [ ] Smoke test WhatsApp `/message` and confirm response under 5 seconds in practice.
 
-## Nezuko Assistant Enhancements
-- [x] Add wake-word routing for Nezuko.
+## Myara Assistant Enhancements
+- [x] Add wake-word routing for Myara.
 - [x] Persist conversation memory in MongoDB with expiry-based pruning.
 - [x] Add help and utility commands for the WhatsApp assistant.
 - [x] Improve WhatsApp reconnect and QR/auth handling.

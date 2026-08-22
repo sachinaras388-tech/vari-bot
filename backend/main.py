@@ -83,7 +83,7 @@ async def root():
         "status": "online",
         "message": "Yoo! The College Community Bot backend is up and running! ✨",
         "environment": settings.ENVIRONMENT,
-        "nezuko": "ready",
+        "myara": "ready",
     }
 
 

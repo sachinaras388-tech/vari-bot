@@ -1,9 +1,9 @@
 # Backend service
 
-This folder contains the FastAPI backend for the Nezuko assistant.
+This folder contains the FastAPI backend for the Myara assistant.
 
 ## What changed
-- Added a dedicated Nezuko command and memory service for wake-word routing, command handling, and conversation persistence.
+- Added a dedicated Myara command and memory service for wake-word routing, command handling, and conversation persistence.
 - The backend now stores chat history in MongoDB with configurable expiry-based pruning.
 - Added health endpoints and stronger startup/shutdown logging.
 

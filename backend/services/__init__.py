@@ -1,1 +1,1 @@
-"""Shared service helpers for the Nezuko assistant."""
+"""Shared service helpers for the Myara assistant."""

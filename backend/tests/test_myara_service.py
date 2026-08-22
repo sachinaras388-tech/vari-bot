@@ -14,17 +14,17 @@ import backend.services.http_client as http_client
 from backend.routes.whatsapp import receive_whatsapp_message
 from backend.services.commands import extract_command
 from backend.services.gemini_service import GeminiService
-from backend.services.nezuko import sanitize_text, should_trigger_nezuko, build_help_text, is_authorized_admin
+from backend.services.myara import sanitize_text, should_trigger_myara, build_help_text, is_authorized_admin
 
 
-class NezukoServiceTests(unittest.TestCase):
+class MyaraServiceTests(unittest.TestCase):
     def test_sanitize_text_removes_control_chars(self) -> None:
         self.assertEqual(sanitize_text("  Hello\nWorld\x00  "), "Hello World")
 
-    def test_should_trigger_nezuko_is_case_insensitive(self) -> None:
-        self.assertTrue(should_trigger_nezuko("Hello Nezuko how are you?"))
-        self.assertTrue(should_trigger_nezuko("hello nezuko"))
-        self.assertFalse(should_trigger_nezuko("hello there friend"))
+    def test_should_trigger_myara_is_case_insensitive(self) -> None:
+        self.assertTrue(should_trigger_myara("Hello Myara how are you?"))
+        self.assertTrue(should_trigger_myara("hello myara"))
+        self.assertFalse(should_trigger_myara("hello there friend"))
 
     def test_help_text_contains_core_commands(self) -> None:
         help_text = build_help_text()
@@ -33,8 +33,8 @@ class NezukoServiceTests(unittest.TestCase):
         self.assertIn("admin", help_text.lower())
 
     def test_extract_command_strips_wake_word(self) -> None:
-        self.assertEqual(extract_command("Nezuko status"), "status")
-        self.assertEqual(extract_command("hello nezuko broadcast hi"), "broadcast hi")
+        self.assertEqual(extract_command("Myara status"), "status")
+        self.assertEqual(extract_command("hello myara broadcast hi"), "broadcast hi")
         self.assertEqual(extract_command("please help me"), "please help me")
 
     def test_owner_number_is_treated_as_admin(self) -> None:
@@ -204,12 +204,12 @@ class NezukoServiceTests(unittest.TestCase):
             platform_id="whatsapp",
             phone_number="919999999999",
             chat_id="chat-1",
-            message="nezuko hello",
+            message="myara hello",
             timestamp=123,
         )
         request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(http_client=None, weather_api_key="")))
 
-        with patch("backend.routes.whatsapp.decide", new=AsyncMock(return_value={"allowed": True, "ai_enabled": True, "reason": "trigger", "trigger_detected": True, "reply_mode": "Always"})), patch("backend.routes.whatsapp.handle_nezuko_command", new=AsyncMock(return_value={"status": "success", "reply": "hi there"})):
+        with patch("backend.routes.whatsapp.decide", new=AsyncMock(return_value={"allowed": True, "ai_enabled": True, "reason": "trigger", "trigger_detected": True, "reply_mode": "Always"})), patch("backend.routes.whatsapp.handle_myara_command", new=AsyncMock(return_value={"status": "success", "reply": "hi there"})):
             result = asyncio.run(receive_whatsapp_message(request, payload, db))
 
         self.assertEqual(result["status"], "success")

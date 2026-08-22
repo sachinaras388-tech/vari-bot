@@ -22,7 +22,7 @@ LANGUAGES = {
     "pa": "Punjabi",
 }
 MAX_TTS_CHARS = 3000
-TTS_ROOT = Path(tempfile.gettempdir()) / "nezuko_tts"
+TTS_ROOT = Path(tempfile.gettempdir()) / "myara_tts"
 tts_semaphore = asyncio.Semaphore(2)
 
 

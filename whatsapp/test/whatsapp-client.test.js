@@ -62,7 +62,7 @@ test('Baileys inbound messages start typing before the backend call and pause in
     type: 'notify',
     messages: [{
       key: { remoteJid: '919999999999@s.whatsapp.net', fromMe: false },
-      message: { conversation: 'nezuko tell me a joke' },
+      message: { conversation: 'myara tell me a joke' },
       timestamp: Date.now(),
     }],
   };
@@ -71,7 +71,7 @@ test('Baileys inbound messages start typing before the backend call and pause in
     const normalized = {
       phone_number: '919999999999',
       chat_id: '919999999999@s.whatsapp.net',
-      message: 'nezuko tell me a joke',
+      message: 'myara tell me a joke',
       fromMe: false,
       quoted_text: null,
     };

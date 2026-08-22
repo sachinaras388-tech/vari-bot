@@ -266,8 +266,8 @@ class BaileysClient {
         return;
       }
 
-      if (!/nezuko/i.test(normalized.message || '') && !/nezuko/i.test(String(normalized.quoted_text || ''))) {
-        logger.info({ from: normalized.phone_number, chatId: normalized.chat_id, messageText: normalized.message }, 'Baileys message ignored because it did not mention Nezuko');
+      if (!/myara/i.test(normalized.message || '') && !/myara/i.test(String(normalized.quoted_text || ''))) {
+        logger.info({ from: normalized.phone_number, chatId: normalized.chat_id, messageText: normalized.message }, 'Baileys message ignored because it did not mention Myara');
         return;
       }
 

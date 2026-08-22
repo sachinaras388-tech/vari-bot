@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 class OpenRouterService:
-    """Fallback provider for Nezuko using OpenRouter."""
+    """Fallback provider for Myara using OpenRouter."""
 
     def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None) -> None:
         settings = get_settings()
@@ -51,7 +51,7 @@ class OpenRouterService:
             headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "HTTP-Referer": "https://localhost",
-                "X-Title": "Nezuko WhatsApp Bot",
+                "X-Title": "Myara WhatsApp Bot",
                 "Content-Type": "application/json",
             },
             json=payload,

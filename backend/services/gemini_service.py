@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class GeminiService:
-    """Primary provider for Nezuko using Google Gemini."""
+    """Primary provider for Myara using Google Gemini."""
 
     def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None) -> None:
         settings = get_settings()

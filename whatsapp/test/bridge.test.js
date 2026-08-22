@@ -17,7 +17,7 @@ test('normalizeMessagePayload maps a web.js message into the bridge contract', (
   const message = {
     id: { _serialized: 'msg-1' },
     from: '919999999999@c.us',
-    body: 'nezuko hello',
+    body: 'myara hello',
     type: 'chat',
     timestamp: 1710000000,
     fromMe: false,
@@ -34,7 +34,7 @@ test('normalizeMessagePayload maps a web.js message into the bridge contract', (
   assert.equal(normalized.platform_id, '919999999999@c.us');
   assert.equal(normalized.phone_number, '919999999999');
   assert.equal(normalized.chat_id, '919999999999@c.us');
-  assert.equal(normalized.message, 'nezuko hello');
+  assert.equal(normalized.message, 'myara hello');
   assert.equal(normalized.quoted_text, 'quoted text');
   assert.equal(normalized.message_type, 'chat');
   assert.equal(normalized.is_group, false);
@@ -56,22 +56,22 @@ test('status and own messages are ignored before processing', () => {
 });
 
 test('self messages are allowed when explicitly enabled for development testing', () => {
-  const selfMessage = { fromMe: true, isStatus: false, isBroadcast: false, body: 'nezuko help' };
+  const selfMessage = { fromMe: true, isStatus: false, isBroadcast: false, body: 'myara help' };
   assert.equal(shouldProcessMessage(selfMessage, { allowSelfMessages: false }), false);
   assert.equal(shouldProcessMessage(selfMessage, { allowSelfMessages: true }), true);
 });
 
 test('normalized payloads with a message field are processed correctly', () => {
-  const normalizedMessage = { fromMe: true, isStatus: false, isBroadcast: false, message: 'Nezuko help' };
+  const normalizedMessage = { fromMe: true, isStatus: false, isBroadcast: false, message: 'Myara help' };
   assert.equal(shouldProcessMessage(normalizedMessage, { allowSelfMessages: true }), true);
 });
 
 test('loop guard suppresses repeated inbound messages and self-replies', () => {
   const guard = createMessageLoopGuard(5_000);
-  assert.equal(guard.shouldProcess('Nezuko help', 'chat-1', 'user-1'), true);
-  assert.equal(guard.shouldProcess('Nezuko help', 'chat-1', 'user-1'), false);
-  guard.markOutbound('chat-1', 'Nezuko commands');
-  assert.equal(guard.shouldProcess('Nezuko commands', 'chat-1', 'user-1'), false);
+  assert.equal(guard.shouldProcess('Myara help', 'chat-1', 'user-1'), true);
+  assert.equal(guard.shouldProcess('Myara help', 'chat-1', 'user-1'), false);
+  guard.markOutbound('chat-1', 'Myara commands');
+  assert.equal(guard.shouldProcess('Myara commands', 'chat-1', 'user-1'), false);
 });
 
 test('transient failures are retried and timeouts use backoff', () => {
@@ -119,14 +119,14 @@ test('WhatsAppBridge builds the FastAPI payload with required schema and timesta
   const bridge = new WhatsAppBridge();
   const normalized = {
     chat_id: '919999999999@c.us',
-    message: 'Hello Nezuko',
+    message: 'Hello Myara',
   };
 
   const payload = bridge.buildFastApiPayload(normalized);
 
   assert.equal(payload.platform_id, 'whatsapp');
   assert.equal(payload.chat_id, '919999999999@c.us');
-  assert.equal(payload.message, 'Hello Nezuko');
+  assert.equal(payload.message, 'Hello Myara');
   assert.equal(typeof payload.timestamp, 'number');
   assert.ok(payload.timestamp > 0);
 });
@@ -136,7 +136,7 @@ test('WhatsAppBridge sends the FastAPI reply back to WhatsApp users', async () =
   const normalized = {
     phone_number: '919999999999',
     chat_id: '919999999999@c.us',
-    message: 'Hello Nezuko',
+    message: 'Hello Myara',
   };
 
   let sentReply = null;
@@ -187,7 +187,7 @@ test('BaileysClient forwards valid messages to FastAPI and sends replies over Ba
 
   const result = await client.handleIncomingWebhook({
     chat_id: '919999999999@c.us',
-    message: 'Nezuko hello',
+    message: 'Myara hello',
     phone_number: '919999999999',
     timestamp: 1710000000,
     raw_message_id: 'msg-123',
@@ -197,7 +197,7 @@ test('BaileysClient forwards valid messages to FastAPI and sends replies over Ba
   assert.equal(result.reply, 'Hello from FastAPI');
   assert.equal(forwardedPayload.platform_id, 'whatsapp');
   assert.equal(forwardedPayload.chat_id, '919999999999@c.us');
-  assert.equal(forwardedPayload.message, 'Nezuko hello');
+  assert.equal(forwardedPayload.message, 'Myara hello');
   assert.equal(typeof forwardedPayload.timestamp, 'number');
   assert.equal(sentMessages[sentMessages.length - 1].to, '919999999999@c.us');
   assert.equal(sentMessages[sentMessages.length - 1].text, 'Hello from FastAPI');

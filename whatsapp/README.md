@@ -25,7 +25,7 @@ This service now operates as a WhatsApp Cloud API bridge that normalizes incomin
 - WHATSAPP_SESSION_PATH (optional)
 - WHATSAPP_MAX_RECONNECT_ATTEMPTS (optional)
 
-## Nezuko notes
+## Myara notes
 - The bridge honors wake-word messages and forwards them to the backend for AI reply generation.
 - QR code data is available from /qr, /qr.png, and /qr.svg when session-based auth is in use.
 - Reconnect loops are guarded to avoid duplicate recovery attempts.
