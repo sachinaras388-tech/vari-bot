@@ -35,6 +35,10 @@ class AIRouter:
                 logger.info("[Gemini] Attempt %d", attempt)
                 return await self.gemini.generate(prompt, system_instruction=system_instruction, history=history, timeout=10.0)
             except Exception as exc:
+                if self._is_authentication_failure(exc):
+                    logger.error("[Gemini] Authentication failed; not switching to another provider with the same key")
+                    return "❌ Senpai, the Gemini API key is invalid or expired. Please set a valid GEMINI_API_KEY (or AI_API_KEY) in the .env file. 🥺"
+
                 if not self._is_retryable_failure(exc):
                     logger.warning("[Gemini] Non-retryable failure: %s", exc)
                     break
@@ -71,3 +75,13 @@ class AIRouter:
             return True
 
         return False
+
+    def _is_authentication_failure(self, exc: Exception) -> bool:
+        message = str(exc).lower()
+        return any(marker in message for marker in [
+            "401",
+            "unauthorized",
+            "unauthenticated",
+            "invalid authentication credentials",
+            "api key is invalid",
+        ])

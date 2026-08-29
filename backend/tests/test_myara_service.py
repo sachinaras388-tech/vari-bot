@@ -99,6 +99,23 @@ class MyaraServiceTests(unittest.TestCase):
         self.assertFalse(router._is_retryable_failure(RuntimeError("RESOURCE_EXHAUSTED")))
         self.assertTrue(router._is_retryable_failure(RuntimeError("HTTP 503: temporary server error")))
 
+    def test_ai_router_identifies_authentication_failures(self) -> None:
+        router = AIRouter()
+        self.assertTrue(router._is_authentication_failure(RuntimeError("401 UNAUTHENTICATED")))
+        self.assertFalse(router._is_authentication_failure(RuntimeError("HTTP 503: temporary server error")))
+
+    def test_ai_router_does_not_hide_gemini_auth_failure_as_fallback_outage(self) -> None:
+        router = AIRouter()
+
+        async def fail_auth(*args: object, **kwargs: object) -> str:
+            raise RuntimeError("401 UNAUTHENTICATED")
+
+        with patch.object(router.gemini, "generate", new=fail_auth), patch.object(router.openrouter, "generate", new=AsyncMock()) as fallback:
+            result = asyncio.run(router.generate("hello", system_instruction="reply", history=[]))
+
+        self.assertIn("Gemini API key is invalid or expired", result)
+        fallback.assert_not_awaited()
+
     def test_build_runtime_system_prompt_renders_current_context(self) -> None:
         prompt = build_runtime_system_prompt()
         self.assertIn("Current Date:", prompt)
