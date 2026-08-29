@@ -20,8 +20,6 @@ class OpenRouterService:
             api_key
             or os.getenv("OPENROUTER_API_KEY")
             or getattr(settings, "OPENROUTER_API_KEY", None)
-            or os.getenv("AI_API_KEY")
-            or getattr(settings, "AI_API_KEY", None)
             or ""
         ).strip()
         self.model = (model or os.getenv("OPENROUTER_MODEL") or "openai/gpt-4o-mini").strip()

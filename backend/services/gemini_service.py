@@ -21,16 +21,18 @@ class GeminiService:
         self.api_key = (
             api_key
             or os.getenv("GEMINI_API_KEY")
+            or getattr(settings, "GEMINI_API_KEY", None)
             or os.getenv("AI_API_KEY")
             or getattr(settings, "AI_API_KEY", None)
             or ""
         ).strip()
-        self.model = (
+        configured_model = (
             model
             or os.getenv("GEMINI_MODEL")
             or getattr(settings, "GEMINI_MODEL", None)
-            or "gemini-2.5-flash"
+            or "gemini-3.6-flash"
         ).strip()
+        self.model = configured_model.removeprefix("models/")
         self._client: Optional[Any] = None
 
     def _get_client(self) -> Any:

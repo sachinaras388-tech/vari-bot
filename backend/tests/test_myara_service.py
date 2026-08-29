@@ -50,6 +50,23 @@ class MyaraServiceTests(unittest.TestCase):
             service = GeminiService()
             self.assertEqual(service.api_key, "shared-key")
 
+    def test_gemini_service_normalizes_legacy_model_prefix(self) -> None:
+        service = GeminiService(api_key="test-key", model="models/gemini-3.6-flash")
+        self.assertEqual(service.model, "gemini-3.6-flash")
+
+    def test_openrouter_service_requires_provider_specific_key(self) -> None:
+        with patch.dict(os.environ, {"AI_API_KEY": "legacy-key"}, clear=False):
+            os.environ.pop("OPENROUTER_API_KEY", None)
+            with patch("backend.services.openrouter_service.get_settings", return_value=SimpleNamespace(OPENROUTER_API_KEY=None, AI_API_KEY="legacy-key")):
+                service = OpenRouterService()
+        self.assertEqual(service.api_key, "")
+
+    def test_ai_router_reports_missing_openrouter_key(self) -> None:
+        router = AIRouter()
+        router.openrouter.api_key = ""
+        result = asyncio.run(router._generate_with_openrouter("hello", system_instruction="reply", history=[]))
+        self.assertIn("OPENROUTER_API_KEY", result)
+
     def test_gemini_service_uses_keyword_sdk_call(self) -> None:
         service = GeminiService(api_key="test-key")
 
@@ -110,6 +127,7 @@ class MyaraServiceTests(unittest.TestCase):
         async def fail_auth(*args: object, **kwargs: object) -> str:
             raise RuntimeError("401 UNAUTHENTICATED")
 
+        router.openrouter.api_key = ""
         with patch.object(router.gemini, "generate", new=fail_auth), patch.object(router.openrouter, "generate", new=AsyncMock()) as fallback:
             result = asyncio.run(router.generate("hello", system_instruction="reply", history=[]))
 

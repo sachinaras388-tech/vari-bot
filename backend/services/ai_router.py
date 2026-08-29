@@ -18,6 +18,14 @@ class AIRouter:
         self.primary_provider = (os.getenv("PRIMARY_PROVIDER") or "gemini").strip().lower()
         self.gemini = GeminiService()
         self.openrouter = OpenRouterService()
+        logger.info("Gemini API key configured: %s", "YES" if self.gemini.api_key else "NO")
+        logger.info("Gemini model: %s", self.gemini.model)
+        logger.info("OpenRouter API key configured: %s", "YES" if self.openrouter.api_key else "NO")
+        logger.info("OpenRouter model: %s", self.openrouter.model)
+        if not self.gemini.api_key:
+            logger.warning("[Gemini] GEMINI_API_KEY is not configured")
+        if not self.openrouter.api_key:
+            logger.warning("[OpenRouter] OPENROUTER_API_KEY is not configured")
 
     async def generate(self, prompt: str, *, system_instruction: str, history: Optional[list[dict[str, Any]]] = None) -> str:
         if not prompt:
@@ -36,8 +44,11 @@ class AIRouter:
                 return await self.gemini.generate(prompt, system_instruction=system_instruction, history=history, timeout=10.0)
             except Exception as exc:
                 if self._is_authentication_failure(exc):
-                    logger.error("[Gemini] Authentication failed; not switching to another provider with the same key")
-                    return "❌ Senpai, the Gemini API key is invalid or expired. Please set a valid GEMINI_API_KEY (or AI_API_KEY) in the .env file. 🥺"
+                    logger.error("[Gemini] Authentication failed")
+                    if self.openrouter.api_key:
+                        logger.warning("[Router] Switching to OpenRouter after Gemini authentication failure")
+                        return await self._generate_with_openrouter(prompt, system_instruction=system_instruction, history=history)
+                    return "❌ Senpai, the Gemini API key is invalid or expired. Please set a valid GEMINI_API_KEY in the .env file. 🥺"
 
                 if not self._is_retryable_failure(exc):
                     logger.warning("[Gemini] Non-retryable failure: %s", exc)
@@ -53,6 +64,10 @@ class AIRouter:
         return await self._generate_with_openrouter(prompt, system_instruction=system_instruction, history=history)
 
     async def _generate_with_openrouter(self, prompt: str, *, system_instruction: str, history: Optional[list[dict[str, Any]]] = None) -> str:
+        if not self.openrouter.api_key:
+            logger.error("[OpenRouter] OPENROUTER_API_KEY is not configured")
+            return "❌ Senpai, OpenRouter is not configured. Please set OPENROUTER_API_KEY in the .env file. 🥺"
+
         try:
             response = await self.openrouter.generate(prompt, system_instruction=system_instruction, history=history, timeout=20.0)
             logger.info("[OpenRouter] Success")
@@ -61,7 +76,10 @@ class AIRouter:
             msg = str(exc).lower()
             if "401" in msg or "unauthorized" in msg:
                 logger.error("[OpenRouter] OpenRouter authentication failed (Please check OPENROUTER_API_KEY in .env)")
-                return "❌ Senpai, my API key seems to be invalid or expired! Please check the AI_API_KEY in the `.env` file! 🥺"
+                return "❌ Senpai, the OpenRouter API key is invalid or expired. Please set a valid OPENROUTER_API_KEY in the .env file. 🥺"
+            if "404" in msg or "model" in msg and "not found" in msg:
+                logger.error("[OpenRouter] Configured model is unavailable: %s", self.openrouter.model)
+                return "❌ Senpai, the configured OpenRouter model is unavailable. Please set a supported OPENROUTER_MODEL in the .env file. 🥺"
             else:
                 logger.warning("[OpenRouter] Failed: %s", exc)
             return "🌸 Myara is taking a tiny tea break, senpai! Please try again in a few moments. 💖"
