@@ -21,10 +21,11 @@ class MyaraServiceTests(unittest.TestCase):
     def test_sanitize_text_removes_control_chars(self) -> None:
         self.assertEqual(sanitize_text("  Hello\nWorld\x00  "), "Hello World")
 
-    def test_should_trigger_myara_is_case_insensitive(self) -> None:
+    def test_should_trigger_myara_accepts_any_text(self) -> None:
         self.assertTrue(should_trigger_myara("Hello Myara how are you?"))
         self.assertTrue(should_trigger_myara("hello myara"))
-        self.assertFalse(should_trigger_myara("hello there friend"))
+        self.assertTrue(should_trigger_myara("hello there friend"))
+        self.assertFalse(should_trigger_myara(""))
 
     def test_help_text_contains_core_commands(self) -> None:
         help_text = build_help_text()

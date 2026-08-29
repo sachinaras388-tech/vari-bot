@@ -39,6 +39,28 @@ async def ensure_indexes() -> None:
         logger.exception("Failed to ensure Mongo indexes")
 
 
+import certifi
+
+def validate_mongodb_uri(uri: str) -> None:
+    if not uri:
+        return
+        
+    logger.info("MongoDB URI configured: YES")
+    logger.info(f"MongoDB database configured: {settings.DATABASE_NAME}")
+    
+    if not uri.startswith("mongodb://") and not uri.startswith("mongodb+srv://"):
+        logger.error("❌ Invalid MongoDB URI: Must start with 'mongodb://' or 'mongodb+srv://'")
+    
+    if "@" in uri:
+        auth_part = uri.split("@")[0]
+        prefix = "mongodb+srv://" if uri.startswith("mongodb+srv://") else "mongodb://"
+        auth_part = auth_part.replace(prefix, "")
+        if ":" in auth_part:
+            pwd_part = auth_part.split(":", 1)[1]
+            if "%" not in pwd_part and any(c in pwd_part for c in "@#/:?&"):
+                logger.warning("⚠️ MongoDB password contains special characters that are not URL-encoded.")
+                logger.warning("If your password contains @, #, %, /, :, ?, or &, it MUST be URL-encoded (e.g. %40 for @).")
+
 async def connect_to_mongo() -> None:
     """Create a single shared MongoDB client and validate it once."""
     if db_instance.client is not None:
@@ -50,15 +72,19 @@ async def connect_to_mongo() -> None:
         db_instance.db = None
         return
 
+    validate_mongodb_uri(settings.MONGODB_URI)
+
     try:
         logger.info("⏳ Connecting to MongoDB...")
         db_instance.client = AsyncIOMotorClient(
             settings.MONGODB_URI,
             maxPoolSize=50,
             minPoolSize=5,
-            serverSelectionTimeoutMS=3000,
+            serverSelectionTimeoutMS=10000,
+            connectTimeoutMS=10000,
             connect=False,
             retryWrites=True,
+            tlsCAFile=certifi.where()
         )
         db_instance.db = db_instance.client[settings.DATABASE_NAME]
 
@@ -68,7 +94,13 @@ async def connect_to_mongo() -> None:
     except Exception:
         db_instance.client = None
         db_instance.db = None
-        logger.exception("❌ Could not connect to MongoDB")
+        logger.error("❌ MongoDB connection failed.")
+        logger.error("Possible causes:")
+        logger.error("1. MongoDB Atlas cluster is paused/stopped.")
+        logger.error("2. Current IP is not allowed in Atlas Network Access.")
+        logger.error("3. MongoDB credentials are incorrect.")
+        logger.error("4. MongoDB URI is invalid.")
+        logger.error("5. Network/DNS connection to Atlas is blocked.")
         raise
 
 

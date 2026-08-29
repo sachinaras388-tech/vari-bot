@@ -141,22 +141,15 @@ class WhatsAppBridge extends EventEmitter {
 
     const messageBody = normalized.message || '';
     const specialCommand = /^(\/dw|\/tts|\/vc|\/voice)(\s|$)/i.test(messageBody.trim());
-    const wakeWordDetected = specialCommand || /myara/i.test(messageBody) || /myara/i.test(String(normalized.quoted_text || ''));
     logger.info(
       {
         from: normalized.phone_number,
         chatId: normalized.chat_id,
         messageText: messageBody,
-        wakeWordDetected,
         allowSelfMessages: this.allowSelfMessages,
       },
       'Incoming WhatsApp message received'
     );
-
-    if (!wakeWordDetected) {
-      logger.info({ from: normalized.phone_number, chatId: normalized.chat_id, messageText: messageBody }, 'Ignoring WhatsApp message because it did not trigger the bot');
-      return { status: 'ignored', reason: 'no_trigger' };
-    }
 
     if (!shouldProcessMessage(message, { allowSelfMessages: this.allowSelfMessages })) {
       logger.info({ from: normalized.phone_number, chatId: normalized.chat_id, messageText: messageBody }, 'Ignoring message that is a status, broadcast, or own message');

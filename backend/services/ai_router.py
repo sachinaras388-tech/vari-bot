@@ -54,7 +54,11 @@ class AIRouter:
             logger.info("[OpenRouter] Success")
             return response
         except Exception as exc:
-            logger.warning("[OpenRouter] Failed: %s", exc)
+            msg = str(exc).lower()
+            if "401" in msg or "unauthorized" in msg:
+                logger.error("[OpenRouter] OpenRouter authentication failed (Please check OPENROUTER_API_KEY in .env)")
+            else:
+                logger.warning("[OpenRouter] Failed: %s", exc)
             return "🌸 Myara is taking a tiny tea break, senpai! Please try again in a few moments. 💖"
 
     def _is_retryable_failure(self, exc: Exception) -> bool:

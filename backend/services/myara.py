@@ -34,11 +34,9 @@ def sanitize_text(text: str | None) -> str:
 
 
 def should_trigger_myara(text: str | None) -> bool:
-    """Return True when the user explicitly addresses Myara."""
+    """Return True for any valid user message, removing wake-word constraints."""
     normalized = sanitize_text(text).lower()
-    if not normalized:
-        return False
-    return WAKE_WORD in normalized or normalized.startswith("/")
+    return bool(normalized)
 
 
 def is_authorized_admin(phone_number: str | None) -> bool:

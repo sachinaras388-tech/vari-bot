@@ -108,5 +108,7 @@ class GeminiService:
             logger.warning("[Gemini] Rate Limited or Quota Exceeded")
         elif "5" in message and "0" in message:
             logger.warning("[Gemini] Temporary server error")
+        elif "401" in message or "unauthenticated" in message or "access_token_type_unsupported" in message:
+            logger.error("[Gemini] Gemini authentication failed (Please check GEMINI_API_KEY in .env)")
         else:
             logger.warning("[Gemini] Provider error: %s", exc)

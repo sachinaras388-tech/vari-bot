@@ -266,10 +266,7 @@ class BaileysClient {
         return;
       }
 
-      if (!/myara/i.test(normalized.message || '') && !/myara/i.test(String(normalized.quoted_text || ''))) {
-        logger.info({ from: normalized.phone_number, chatId: normalized.chat_id, messageText: normalized.message }, 'Baileys message ignored because it did not mention Myara');
-        return;
-      }
+
 
       const dedupeKey = normalized.raw_message_id || `${normalized.chat_id}:${normalized.timestamp}`;
       if (!this.messageDeduper.shouldProcess(dedupeKey)) {
